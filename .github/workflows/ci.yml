@@ -80,7 +80,7 @@ jobs:
           path: |
             target/release/realraw.exe
             target/release/*.dmg
-            target/release/*.deb
+            target/debian/*.deb
             target/release/*.AppImage
             target/release/bundle/**/*.app
             target/release/bundle/**/*.rpm
