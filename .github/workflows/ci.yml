@@ -38,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libfuse2 2>/dev/null || true
+          sudo apt-get install -y -qq libfuse2 || sudo apt-get install -y -qq fuse
           cargo install cargo-deb
           cargo install cargo-appimage
 

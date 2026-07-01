@@ -42,6 +42,9 @@ hex = "0.4"
 rawler = "0.7"
 egui-phosphor = "0.9"
 
+[package.metadata.appimage]
+icon = "assets/icon-64.png"
+
 [package.metadata.deb]
 maintainer = "marcelsker"
 depends = "$auto"

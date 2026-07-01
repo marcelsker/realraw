@@ -65,7 +65,7 @@ cmd_deb() {
 cmd_appimage() {
     require_cmd cargo-appimage
     echo "==> Building AppImage..."
-    cargo appimage --release
+    cargo appimage
     echo "==> Done: target/release/${BIN_NAME}*.AppImage"
 }
 
