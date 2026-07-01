@@ -2,9 +2,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
-
-use directories::UserDirs;
 
 use eframe::egui;
 
@@ -12,6 +11,8 @@ use crate::app::library::LibraryPage;
 use crate::catalog::{Catalog, Counts};
 use crate::import::{ImportDialog, ImportSummary, dialog::Phase as DialogPhase};
 use crate::task::{TaskManager, TaskSnapshot, TaskStatus};
+
+type StartupResult = Option<(PathBuf, Catalog)>;
 
 /// Top-level application state. Owned by eframe's run loop and rendered once
 /// per frame via the [`eframe::App`] impl below.
@@ -67,64 +68,31 @@ pub struct App {
     pub setup_dir: PathBuf,
     /// Last error from catalog creation in the setup dialog.
     pub setup_error: Option<String>,
+
+    /// Receiver for the background startup check result.
+    startup_rx: Option<Receiver<StartupResult>>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let picture_dir = || -> PathBuf {
-            UserDirs::new()
-                .and_then(|u| u.picture_dir().map(|p| p.to_path_buf()))
-                .unwrap_or_else(|| PathBuf::from("."))
-        };
+        // Spawn a background thread to find + open the catalog so the
+        // window renders immediately even when the catalog file is on
+        // a slow filesystem (e.g. iCloud).
+        let (tx, rx) = channel();
+        std::thread::Builder::new()
+            .name("startup-catalog".into())
+            .spawn(move || {
+                // Prefer the last-loaded path, then the default.
+                let result = Catalog::load_last_path()
+                    .and_then(|p| Catalog::open_existing(&p).ok().map(|c| (p, c)))
+                    .or_else(|| {
+                        Catalog::default_path().ok()
+                            .and_then(|p| Catalog::open_existing(&p).ok().map(|c| (p, c)))
+                    });
+                let _ = tx.send(result);
+            })
+            .expect("spawn startup-catalog");
 
-        let last = Catalog::load_last_path()
-            .and_then(|p| Catalog::open_existing(&p).ok().map(|c| (p, c)));
-        let (catalog, catalog_counts, catalog_error, show_setup_dialog, setup_name, setup_dir, setup_error) =
-            if let Some((_path, cat)) = last {
-                let counts = cat.counts().ok();
-                (Some(Arc::new(cat)), counts, None, false, String::new(), PathBuf::new(), None)
-            } else {
-                match Catalog::default_path() {
-                    Ok(p) => match Catalog::open_existing(&p) {
-                        Ok(c) => {
-                            let counts = c.counts().ok();
-                            (Some(Arc::new(c)), counts, None, false, String::new(), PathBuf::new(), None)
-                        }
-                        Err(e) => {
-                            let is_not_found =
-                                matches!(&e, crate::catalog::CatalogError::NotFound(_));
-                            (
-                                None,
-                                None,
-                                if is_not_found { None } else { Some(e.to_string()) },
-                                true,
-                                "realraw".to_string(),
-                                picture_dir(),
-                                None,
-                            )
-                        }
-                    },
-                    Err(e) => (
-                        None,
-                        None,
-                        Some(e.to_string()),
-                        true,
-                        "realraw".to_string(),
-                        picture_dir(),
-                        None,
-                    ),
-                }
-            };
-        let mut library = LibraryPage::default();
-        if let Some(cat) = catalog.as_ref() {
-            library.refresh(cat, None);
-        }
-        let library_last_refresh_mtime_ms = catalog
-            .as_ref()
-            .and_then(|c| std::fs::metadata(c.path()).ok())
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64);
         Self {
             show_about: false,
             task_manager: TaskManager::new().set_max_concurrency(4),
@@ -132,26 +100,61 @@ impl Default for App {
             next_demo_id: 1,
             tasks_open: false,
             all_done_at: None,
-            catalog,
-            catalog_counts,
-            catalog_error,
+            catalog: None,
+            catalog_counts: None,
+            catalog_error: None,
             import_dialog: None,
-            library,
-            library_last_refresh_mtime_ms,
+            library: LibraryPage::default(),
+            library_last_refresh_mtime_ms: None,
             library_needs_refresh: false,
             last_dialog_phase: None,
             import_summary_rx: None,
             logo: None,
-            show_setup_dialog,
-            setup_name,
-            setup_dir,
-            setup_error,
+            show_setup_dialog: false,
+            setup_name: String::new(),
+            setup_dir: PathBuf::new(),
+            setup_error: None,
+            startup_rx: Some(rx),
         }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain the startup check result (runs in a background thread).
+        if let Some(rx) = &self.startup_rx
+            && let Ok(result) = rx.try_recv()
+        {
+            self.startup_rx = None;
+            match result {
+                Some((path, cat)) => {
+                    Catalog::save_last_path(&path);
+                    let counts = cat.counts().ok();
+                    self.catalog = Some(Arc::new(cat));
+                    self.catalog_counts = counts;
+                    self.catalog_error = None;
+                    if let Some(cat) = self.catalog.as_ref() {
+                        self.library.refresh(cat, None);
+                    }
+                    self.library_last_refresh_mtime_ms = self
+                        .catalog
+                        .as_ref()
+                        .and_then(|c| std::fs::metadata(c.path()).ok())
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as i64);
+                }
+                None => {
+                    let dir = directories::UserDirs::new()
+                        .and_then(|u| u.picture_dir().map(|p| p.to_path_buf()))
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    self.show_setup_dialog = true;
+                    self.setup_name = "realraw".to_string();
+                    self.setup_dir = dir;
+                }
+            }
+        }
+
         // Drain background progress into the manager every frame.
         self.task_manager.sync();
         self.last_snapshot = self.task_manager.snapshot();
@@ -243,5 +246,3 @@ impl eframe::App for App {
         }
     }
 }
-
-
