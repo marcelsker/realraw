@@ -64,7 +64,10 @@ impl Catalog {
         Self::open_existing(path)
     }
 
-    fn open_existing(path: &Path) -> Result<Self> {
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(CatalogError::NotFound(path.to_path_buf()));
+        }
         let manager = SqliteConnectionManager::file(path).with_init(|c| {
             // PRAGMAs that must be re-applied on every connection.
             //

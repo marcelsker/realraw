@@ -1,7 +1,10 @@
 //! Top-level application state and egui integration.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use directories::UserDirs;
 
 use eframe::egui;
 
@@ -55,18 +58,56 @@ pub struct App {
 
     /// Logo texture for the About dialog.
     logo: Option<egui::TextureHandle>,
+
+    /// Whether to show the first-launch setup dialog.
+    pub show_setup_dialog: bool,
+    /// Collection name entered in the setup dialog.
+    pub setup_name: String,
+    /// Directory chosen in the setup dialog.
+    pub setup_dir: PathBuf,
+    /// Last error from catalog creation in the setup dialog.
+    pub setup_error: Option<String>,
 }
 
 impl Default for App {
     fn default() -> Self {
-        let catalog = Catalog::default_path().and_then(|p| Catalog::open(&p));
-        let (catalog, catalog_counts, catalog_error) = match catalog {
-            Ok(c) => {
-                let counts = c.counts().ok();
-                (Some(Arc::new(c)), counts, None)
-            }
-            Err(e) => (None, None, Some(e.to_string())),
+        let picture_dir = || -> PathBuf {
+            UserDirs::new()
+                .and_then(|u| u.picture_dir().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."))
         };
+
+        let (catalog, catalog_counts, catalog_error, show_setup_dialog, setup_name, setup_dir, setup_error) =
+            match Catalog::default_path() {
+                Ok(p) => match Catalog::open_existing(&p) {
+                    Ok(c) => {
+                        let counts = c.counts().ok();
+                        (Some(Arc::new(c)), counts, None, false, String::new(), PathBuf::new(), None)
+                    }
+                    Err(e) => {
+                        let is_not_found =
+                            matches!(&e, crate::catalog::CatalogError::NotFound(_));
+                        (
+                            None,
+                            None,
+                            if is_not_found { None } else { Some(e.to_string()) },
+                            true,
+                            "realraw".to_string(),
+                            picture_dir(),
+                            None,
+                        )
+                    }
+                },
+                Err(e) => (
+                    None,
+                    None,
+                    Some(e.to_string()),
+                    true,
+                    "realraw".to_string(),
+                    picture_dir(),
+                    None,
+                ),
+            };
         let mut library = LibraryPage::default();
         if let Some(cat) = catalog.as_ref() {
             library.refresh(cat, None);
@@ -94,6 +135,10 @@ impl Default for App {
             last_dialog_phase: None,
             import_summary_rx: None,
             logo: None,
+            show_setup_dialog,
+            setup_name,
+            setup_dir,
+            setup_error,
         }
     }
 }
@@ -145,6 +190,10 @@ impl eframe::App for App {
         render_tasks_panel(self, ctx, has_running, running, total);
         render_status_bar(self, ctx);
         render_central(self, ctx);
+
+        if self.show_setup_dialog {
+            render_setup_dialog(self, ctx);
+        }
 
         if self.show_about {
             render_about_modal(self, ctx);
@@ -361,6 +410,87 @@ fn render_about_modal(app: &mut App, ctx: &egui::Context) {
     });
     if response.should_close() {
         app.show_about = false;
+    }
+}
+
+fn render_setup_dialog(app: &mut App, ctx: &egui::Context) {
+    let mut catalog_created = false;
+
+    let response = egui::Modal::new(egui::Id::new("setup_dialog")).show(ctx, |ui| {
+        ui.heading("Welcome to realraw");
+        ui.label("Create your first collection to get started.");
+        ui.add_space(12.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Collection name:");
+            ui.add(
+                egui::TextEdit::singleline(&mut app.setup_name)
+                    .hint_text("realraw")
+                    .desired_width(240.0),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Save location:");
+            ui.label(app.setup_dir.display().to_string());
+            if ui.button("Browse...").clicked() {
+                if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                    app.setup_dir = p;
+                }
+            }
+        });
+
+        ui.add_space(16.0);
+
+        if let Some(ref err) = app.setup_error {
+            ui.colored_label(egui::Color32::LIGHT_RED, err);
+        }
+
+        ui.horizontal(|ui| {
+            let can_create = !app.setup_name.trim().is_empty();
+            if ui
+                .add_enabled(can_create, egui::Button::new("Create Catalog"))
+                .clicked()
+            {
+                let dir = app.setup_dir.join(app.setup_name.trim());
+                let path = dir.join("catalog.sqlite");
+                match Catalog::create(&path) {
+                    Ok(cat) => {
+                        let counts = cat.counts().ok();
+                        app.catalog = Some(Arc::new(cat));
+                        app.catalog_counts = counts;
+                        app.catalog_error = None;
+                        app.setup_error = None;
+                        catalog_created = true;
+                    }
+                    Err(e) => {
+                        app.setup_error = Some(e.to_string());
+                    }
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                catalog_created = true;
+            }
+        });
+    });
+
+    if response.should_close() || catalog_created {
+        if app.catalog.is_some() {
+            if let Some(cat) = app.catalog.as_ref() {
+                app.library.refresh(cat, None);
+            }
+            app.library_last_refresh_mtime_ms = app
+                .catalog
+                .as_ref()
+                .and_then(|c| std::fs::metadata(c.path()).ok())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64);
+        }
+        app.setup_error = None;
+        app.show_setup_dialog = false;
     }
 }
 
