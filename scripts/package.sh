@@ -59,7 +59,7 @@ cmd_dmg() {
 cmd_deb() {
     require_cmd cargo-deb
     echo "==> Building .deb package..."
-    cargo deb -- --release
+    cargo deb
     echo "==> Done: target/debian/${BIN_NAME}_*.deb"
 }
 
