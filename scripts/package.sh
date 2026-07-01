@@ -14,7 +14,6 @@ Commands:
   app-macos        Build .app bundle for macOS (requires cargo-bundle)
   dmg              Build .app then wrap in .dmg (requires create-dmg)
   deb              Build .deb package for Debian/Ubuntu (requires cargo-deb)
-  rpm              Build .rpm package for Fedora/RHEL (requires cargo-bundle)
   appimage         Build AppImage for Linux (requires cargo-appimage)
   exe              Build Windows .exe (icon embedded automatically via build.rs)
   all              Run all available commands for the current OS
@@ -63,13 +62,6 @@ cmd_deb() {
     echo "==> Done: target/debian/${BIN_NAME}_*.deb"
 }
 
-cmd_rpm() {
-    require_cmd cargo-bundle
-    echo "==> Building .rpm package..."
-    cargo bundle --release --format rpm
-    echo "==> Done: target/release/bundle/rpm/"
-}
-
 cmd_appimage() {
     require_cmd cargo-appimage
     echo "==> Building AppImage..."
@@ -93,9 +85,6 @@ cmd_all() {
             ;;
         Linux)
             cmd_deb
-            if command -v cargo-bundle &>/dev/null; then
-                cmd_rpm
-            fi
             if command -v cargo-appimage &>/dev/null; then
                 cmd_appimage
             fi
@@ -114,7 +103,6 @@ case "$ACTION" in
     app-macos)  cmd_app_macos ;;
     dmg)        cmd_dmg ;;
     deb)        cmd_deb ;;
-    rpm)        cmd_rpm ;;
     appimage)   cmd_appimage ;;
     exe)        cmd_exe ;;
     all)        cmd_all ;;

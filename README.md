@@ -54,7 +54,6 @@ The binary can be packaged into platform-specific installers via `scripts/packag
 | `./scripts/package.sh app-macos` | `cargo install cargo-bundle` | `.app` bundle |
 | `./scripts/package.sh dmg` | `cargo-bundle` + `brew install create-dmg` | `.dmg` disk image |
 | `./scripts/package.sh deb` | `cargo install cargo-deb` | `.deb` (Debian/Ubuntu) |
-| `./scripts/package.sh rpm` | `cargo-bundle` | `.rpm` (Fedora/RHEL) |
 | `./scripts/package.sh appimage` | `cargo install cargo-appimage` | AppImage (any Linux) |
 | `./scripts/package.sh exe` | nothing extra | `.exe` with icon embedded |
 | `./scripts/package.sh all` | all of the above | runs available commands for the current OS |

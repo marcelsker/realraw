@@ -39,7 +39,6 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libfuse2 2>/dev/null || true
-          cargo install cargo-bundle
           cargo install cargo-deb
           cargo install cargo-appimage
 
@@ -72,6 +71,5 @@ jobs:
             target/debian/*.deb
             target/release/*.AppImage
             target/release/bundle/**/*.app
-            target/release/bundle/**/*.rpm
           compression-level: 0
           if-no-files-found: ignore
