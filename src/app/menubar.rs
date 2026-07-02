@@ -62,7 +62,6 @@ fn file_menu(ui: &mut egui::Ui, app: &mut App) {
             try_new_catalog(app, &path);
         }
     }
-    if ui.button("Open Recent").clicked() { ui.close_menu(); }
     ui.separator();
     if ui.button("Export...").clicked() { ui.close_menu(); }
     ui.separator();
