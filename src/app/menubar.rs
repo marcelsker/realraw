@@ -121,9 +121,6 @@ fn library_menu(ui: &mut egui::Ui, app: &mut App) {
     if ui.button("Flag as Picked").clicked() { ui.close_menu(); }
     if ui.button("Flag as Rejected").clicked() { ui.close_menu(); }
     if ui.button("Add Keyword").clicked() { ui.close_menu(); }
-    ui.separator();
-    if ui.button("Go to Grid View").clicked() { ui.close_menu(); }
-    if ui.button("Go to Loupe View").clicked() { ui.close_menu(); }
 }
 
 fn photo_menu(ui: &mut egui::Ui) {
