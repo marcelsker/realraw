@@ -49,12 +49,10 @@ impl ImportSummary {
     }
 }
 
-/// One file passed to [`import_batch`]. The pipeline skips files whose
-/// `selected` flag is `false`.
+/// One file passed to [`import_batch`].
 #[derive(Debug, Clone)]
 pub struct ImportFile {
     pub path: PathBuf,
-    pub selected: bool,
 }
 
 /// Spawn a batch of import tasks under a single group. The function
@@ -75,9 +73,7 @@ pub fn import_batch(
     let (summary_tx, summary_rx) = channel::<ImportSummary>();
     let (summary_acc_tx, summary_acc_rx) = channel::<ImportUpdate>();
 
-    // Capture a count for the spinner task before we move `files` into
-    // the per-file loop below.
-    let total = files.iter().filter(|f| f.selected).count().max(1);
+    let total = files.len().max(1);
 
     // Spinner task: aggregates per-file results and emits the final
     // summary. Keeps the public API simple -- callers get exactly one
@@ -112,9 +108,6 @@ pub fn import_batch(
 
     // Per-file tasks.
     for f in files {
-        if !f.selected {
-            continue;
-        }
         let path = f.path.clone();
         let catalog = catalog.clone();
         let summary_acc = summary_acc_tx.clone();
@@ -379,7 +372,7 @@ mod tests {
         let summary_rx = import_batch(
             &mut mgr,
             cat.clone(),
-            vec![ImportFile { path: photo, selected: true }],
+            vec![ImportFile { path: photo }],
             "Test import",
             None,
         );

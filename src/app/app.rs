@@ -95,6 +95,9 @@ pub struct App {
 
     /// Receiver for the background startup check result.
     startup_rx: Option<Receiver<StartupResult>>,
+
+    /// Active toast notifications.
+    pub toasts: crate::app::toasts::Toasts,
 }
 
 impl Default for App {
@@ -141,6 +144,7 @@ impl Default for App {
             setup_dir: PathBuf::new(),
             setup_error: None,
             startup_rx: Some(rx),
+            toasts: crate::app::toasts::Toasts::default(),
         }
     }
 }
@@ -271,6 +275,8 @@ impl eframe::App for App {
                 crate::app::close_dialog::render(self, ctx);
             }
         }
+
+        self.toasts.show(ctx);
 
         // Keep repainting while tasks are running (smooth bar) and during
         // the grace period (so the badge clears on time).

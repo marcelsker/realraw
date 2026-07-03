@@ -8,10 +8,10 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context, show_badge: bool, overa
     egui::TopBottomPanel::top("menubar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| file_menu(ui, app));
-            ui.menu_button("Edit", edit_menu);
+            ui.menu_button("Edit", |ui| edit_menu(ui, app));
             ui.menu_button("Library", |ui| library_menu(ui, app));
-            ui.menu_button("Photo", photo_menu);
-            ui.menu_button("View", view_menu);
+            ui.menu_button("Photo", |ui| photo_menu(ui, app));
+            ui.menu_button("View", |ui| view_menu(ui, app));
             ui.menu_button("Help", |ui| {
                 if ui.button("About").clicked() {
                     app.show_about = true;
@@ -63,7 +63,10 @@ fn file_menu(ui: &mut egui::Ui, app: &mut App) {
         }
     }
     ui.separator();
-    if ui.button("Export...").clicked() { ui.close_menu(); }
+    if ui.button("Export...").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
     if ui.button("Quit").clicked() {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -101,13 +104,28 @@ pub(crate) fn try_new_catalog(app: &mut App, path: &std::path::Path) {
     }
 }
 
-fn edit_menu(ui: &mut egui::Ui) {
-    if ui.button("Undo").clicked() { ui.close_menu(); }
-    if ui.button("Redo").clicked() { ui.close_menu(); }
+fn edit_menu(ui: &mut egui::Ui, app: &mut App) {
+    if ui.button("Undo").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Redo").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Cut").clicked() { ui.close_menu(); }
-    if ui.button("Copy").clicked() { ui.close_menu(); }
-    if ui.button("Paste").clicked() { ui.close_menu(); }
+    if ui.button("Cut").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Copy").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Paste").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
 }
 
 fn library_menu(ui: &mut egui::Ui, app: &mut App) {
@@ -115,36 +133,99 @@ fn library_menu(ui: &mut egui::Ui, app: &mut App) {
         app.import_dialog = Some(ImportDialog::default());
         ui.close_menu();
     }
-    if ui.button("New Catalog...").clicked() { ui.close_menu(); }
+    if ui.button("New Catalog...").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Find").clicked() { ui.close_menu(); }
-    if ui.button("Flag as Picked").clicked() { ui.close_menu(); }
-    if ui.button("Flag as Rejected").clicked() { ui.close_menu(); }
-    if ui.button("Add Keyword").clicked() { ui.close_menu(); }
+    if ui.button("Find").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Flag as Picked").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Flag as Rejected").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Add Keyword").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
 }
 
-fn photo_menu(ui: &mut egui::Ui) {
-    if ui.button("Edit In").clicked() { ui.close_menu(); }
+fn photo_menu(ui: &mut egui::Ui, app: &mut App) {
+    if ui.button("Edit In").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Go to Develop").clicked() { ui.close_menu(); }
-    if ui.button("Go to Library").clicked() { ui.close_menu(); }
+    if ui.button("Go to Develop").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Go to Library").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Create Virtual Copy").clicked() { ui.close_menu(); }
-    if ui.button("Go to Next Photo").clicked() { ui.close_menu(); }
-    if ui.button("Go to Previous Photo").clicked() { ui.close_menu(); }
+    if ui.button("Create Virtual Copy").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Go to Next Photo").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Go to Previous Photo").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
 }
 
-fn view_menu(ui: &mut egui::Ui) {
-    if ui.button("Zoom In").clicked() { ui.close_menu(); }
-    if ui.button("Zoom Out").clicked() { ui.close_menu(); }
-    if ui.button("Fit on Screen").clicked() { ui.close_menu(); }
-    if ui.button("Fill Frame").clicked() { ui.close_menu(); }
-    if ui.button("1:1 Pixels").clicked() { ui.close_menu(); }
+fn view_menu(ui: &mut egui::Ui, app: &mut App) {
+    if ui.button("Zoom In").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Zoom Out").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Fit on Screen").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Fill Frame").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("1:1 Pixels").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Loupe").clicked() { ui.close_menu(); }
-    if ui.button("Grid").clicked() { ui.close_menu(); }
-    if ui.button("Compare").clicked() { ui.close_menu(); }
-    if ui.button("Survey").clicked() { ui.close_menu(); }
+    if ui.button("Loupe").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Grid").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Compare").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
+    if ui.button("Survey").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
     ui.separator();
-    if ui.button("Fullscreen").clicked() { ui.close_menu(); }
+    if ui.button("Fullscreen").clicked() {
+        app.toasts.add("Unimplemented");
+        ui.close_menu();
+    }
 }

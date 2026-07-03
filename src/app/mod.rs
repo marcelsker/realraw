@@ -10,5 +10,6 @@ pub mod menubar;
 pub mod setup_dialog;
 pub mod status_bar;
 pub mod tasks_panel;
+pub mod toasts;
 
 pub use app::App;

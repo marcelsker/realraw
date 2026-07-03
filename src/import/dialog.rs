@@ -55,7 +55,6 @@ const ROW_LOOKAHEAD: usize = 2;
 /// One per file: discovery result + per-row UI state.
 pub struct DialogFile {
     pub path: PathBuf,
-    pub selected: bool,
     pub already_in_catalog: bool,
     /// Raw RGBA bytes for the thumbnail (filled by the thumb worker).
     pub thumb_bytes: Option<ThumbnailBytes>,
@@ -205,7 +204,6 @@ impl ImportDialog {
                             .into_iter()
                             .map(|f| DialogFile {
                                 path: f.path,
-                                selected: !f.already_in_catalog,
                                 already_in_catalog: f.already_in_catalog,
                                 thumb_bytes: None,
                                 thumb_requested: false,
@@ -434,18 +432,11 @@ impl ImportDialog {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if self.phase == Phase::Browsing || self.phase == Phase::Done {
-                        let selected = self.files.iter().filter(|f| f.selected).count();
-                        ui.label(format!("{} selected of {}", selected, self.files.len()));
-                    }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             if self.phase == Phase::Browsing {
-                                let any = self.files.iter().any(|f| f.selected);
-                                if ui
-                                    .add_enabled(any, egui::Button::new("Import Selected"))
-                                    .clicked()
+                                if ui.button("Import").clicked()
                                     && let Some(cat) = catalog.clone()
                                 {
                                     let files: Vec<ImportFile> = self
@@ -453,7 +444,6 @@ impl ImportDialog {
                                         .iter()
                                         .map(|f| ImportFile {
                                             path: f.path.clone(),
-                                            selected: f.selected,
                                         })
                                         .collect();
                                     self.import_summary_rx = Some(import_batch(
@@ -464,16 +454,6 @@ impl ImportDialog {
                                         None,
                                     ));
                                     should_close = true;
-                                }
-                                if ui.button("Select All").clicked() {
-                                    for f in &mut self.files {
-                                        f.selected = true;
-                                    }
-                                }
-                                if ui.button("Select None").clicked() {
-                                    for f in &mut self.files {
-                                        f.selected = false;
-                                    }
                                 }
                             }
                         },
@@ -495,18 +475,8 @@ impl ImportDialog {
     fn show_grid(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let layout = crate::thumb_grid::compute_grid(ui);
 
-        // Request thumbnails for every file, not just the visible
-        // ones. The `inflight_thumbs` counter already caps the
-        // number of in-flight extractions at MAX_INFLIGHT_THUMBS,
-        // so this just keeps the work queue topped up. The user
-        // expects every "..." cell to eventually resolve when the
-        // queue is bounded -- not the first few rows only.
         self.request_visible_thumbs(0, self.files.len(), layout.cells_per_row);
 
-        // Project each DialogFile into a GridItem with the right
-        // card config. Selectable + selected mirrors the dialog's
-        // per-file `selected` flag, but in-catalog rows are pinned
-        // unselected so we never re-import them by accident.
         let mut items: Vec<crate::thumb_grid::GridItem> = self
             .files
             .iter()
@@ -517,11 +487,8 @@ impl ImportDialog {
                 thumb_error: f.thumb_error.clone(),
                 config: crate::thumb_grid::ThumbCardConfig {
                     cell_w: layout.cell_w,
-                    selectable: !f.already_in_catalog,
-                    selected: f.selected,
                     in_catalog: f.already_in_catalog,
                     label_override: None,
-                    selected_count: 0,
                 },
                 rect: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::ZERO),
             })
@@ -535,19 +502,6 @@ impl ImportDialog {
             420.0,
             |item| crate::thumb_grid::CacheKey::from_path(&item.full_path),
         );
-
-        // Apply any click results back to the dialog state. The
-        // grid helper can't mutate `self.files` directly (the
-        // closure has its own copy), so we walk the items once more
-        // and trust the index: a click on item `i` toggles
-        // `self.files[i].selected`.
-        for (i, item) in items.iter().enumerate() {
-            if item.config.selected != self.files[i].selected
-                && !self.files[i].already_in_catalog
-            {
-                self.files[i].selected = item.config.selected;
-            }
-        }
     }
 }
 
@@ -726,7 +680,6 @@ mod tests {
         d.phase = Phase::Browsing;
         d.files = vec![DialogFile {
             path: std::path::PathBuf::from("/no/such/file.jpg"),
-            selected: true,
             already_in_catalog: false,
             thumb_bytes: None,
             thumb_requested: true,

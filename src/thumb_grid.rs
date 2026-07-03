@@ -61,65 +61,43 @@ pub struct ThumbnailBytes {
 pub struct ThumbCardConfig {
     /// Cell width in pixels.
     pub cell_w: f32,
-    /// If `true`, clicking the card toggles `selected` and the
-    /// `CardResponse::clicked` flag fires. The caller is expected to
-    /// also update its own state.
-    pub selectable: bool,
-    /// Force the card into the "selected" visual state. Use for
-    /// import dialogs where selection is held outside the renderer.
-    pub selected: bool,
-    /// Force the "already in catalog" visual state (grey label, no
-    /// selection). Used by the import dialog to mark duplicates.
+    /// Force the "already in catalog" visual state (grey label).
+    /// Used by the import dialog to mark duplicates.
     pub in_catalog: bool,
     /// If `Some`, use this text as the label instead of the
     /// caller's filename.
     pub label_override: Option<String>,
-    /// How many items are currently selected in the parent view.
-    /// Used to decide whether to show the batch context menu.
-    pub selected_count: usize,
 }
 
 impl Default for ThumbCardConfig {
     fn default() -> Self {
         Self {
             cell_w: THUMB_CELL,
-            selectable: false,
-            selected: false,
             in_catalog: false,
             label_override: None,
-            selected_count: 0,
         }
     }
 }
 
 /// Outcome of drawing a card, returned to the caller so it can update
-/// its own state (e.g. toggle a `selected` flag in the photo row).
+/// its own state.
 #[derive(Debug, Clone, Copy)]
 pub struct CardResponse {
-    /// `true` if the user just clicked the card. The caller should
-    /// toggle the corresponding `selected` flag in its own state.
-    pub clicked: bool,
     /// `true` if the card is currently being hovered.
     pub hovered: bool,
     /// `true` if the user clicked "Remove" in the card's context
     /// menu. The caller should handle the removal flow.
     pub remove_requested: bool,
-    /// `true` if the user clicked "Remove N items" in the batch
-    /// context menu (card is selected as part of a multi-selection).
-    /// The caller should remove all currently selected items.
-    pub batch_remove_requested: bool,
     /// Screen-space rectangle of the card, in the caller's coordinate
-    /// space. Useful for hit-testing (rubber-band selection, etc.).
+    /// space.
     pub rect: egui::Rect,
 }
 
 impl Default for CardResponse {
     fn default() -> Self {
         Self {
-            clicked: false,
             hovered: false,
             remove_requested: false,
-            batch_remove_requested: false,
             rect: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::ZERO),
         }
     }
@@ -197,16 +175,12 @@ impl std::fmt::Display for CacheKey {
 /// Draw a single thumbnail card. Reserves its own space; the caller
 /// just calls this inside a `ui.horizontal` (or any other layout
 /// context) and we take care of the rect.
-///
-/// If `config.selectable` is `true`, a click toggles
-/// `config.selected` in place. Otherwise the card is hover-only and
-/// `config.selected` is left alone.
 #[allow(clippy::too_many_arguments)]
 pub fn thumb_card<K>(
     ctx: &egui::Context,
     ui: &mut egui::Ui,
     cache_key: K,
-    config: &mut ThumbCardConfig,
+    config: &ThumbCardConfig,
     thumb_bytes: Option<&ThumbnailBytes>,
     thumb_error: Option<&str>,
     full_path: &str,
@@ -218,71 +192,37 @@ where
 {
     let cell_w = config.cell_w;
     let image_h = cell_w * (CARD_ASPECT_H / CARD_ASPECT_W);
-    // Only reserve space for the label strip when there is actually
-    // text to show (label_override = None means no label at all).
     let show_label = config.label_override.is_some() || config.in_catalog;
     let card_h = image_h + INNER_MARGIN * 2.0 + if show_label { LABEL_H } else { 0.0 };
     let card_size = egui::vec2(cell_w, card_h);
 
-    // Reserve space for the card and make the whole thing clickable
-    // when the caller asked for selectable cards.
-    let sense = if config.selectable {
-        egui::Sense::click()
-    } else {
-        egui::Sense::hover()
-    };
-    let (card_rect, response) = ui.allocate_exact_size(card_size, sense);
+    let (card_rect, response) = ui.allocate_exact_size(card_size, egui::Sense::hover());
     let response = response.on_hover_text(full_path);
 
-    // Toggle the selection in place if the user clicked and the
-    // card is selectable. `in_catalog` rows are pinned to
-    // unselected -- the import dialog relies on that to keep
-    // duplicates out of the import set.
-    if response.clicked() && config.selectable && !config.in_catalog {
-        config.selected = !config.selected;
-    }
-
     // Right-click context menu.
-    // Reveal uses a helper that selects the file in the system file
-    // manager — the `open` crate only opens the parent folder without
-    // selection, so we use platform-specific commands instead.
     let remove_clicked = std::cell::Cell::new(false);
-    let batch_remove_clicked = std::cell::Cell::new(false);
     response.context_menu(|ui| {
-        if config.selected && config.selected_count > 1 {
-            if ui.button("Remove").clicked() {
-                batch_remove_clicked.set(true);
-                ui.close_menu();
-            }
-        } else {
-            if ui.button("Open").clicked() {
-                eprintln!("context menu: Open (not implemented)");
-                ui.close_menu();
-            }
-            if item_id.is_some() && ui.button("Remove").clicked() {
-                remove_clicked.set(true);
-                ui.close_menu();
-            }
-            if ui.button("Reveal").clicked() {
-                reveal_in_file_manager(full_path);
-                ui.close_menu();
-            }
+        if ui.button("Open").clicked() {
+            eprintln!("context menu: Open (not implemented)");
+            ui.close_menu();
+        }
+        if item_id.is_some() && ui.button("Remove").clicked() {
+            remove_clicked.set(true);
+            ui.close_menu();
+        }
+        if ui.button("Reveal").clicked() {
+            reveal_in_file_manager(full_path);
+            ui.close_menu();
         }
     });
 
     let card_response = CardResponse {
-        clicked: response.clicked() && config.selectable && !config.in_catalog,
         hovered: response.hovered(),
         remove_requested: remove_clicked.get(),
-        batch_remove_requested: batch_remove_clicked.get(),
         rect: card_rect,
     };
 
-    let selected = config.selected && !config.in_catalog;
     let in_catalog = config.in_catalog;
-
-    // Card background: flat, never tinted by selection. Selection is
-    // signalled *only* by the border.
     let visuals = ui.style().visuals.clone();
     ui.painter().rect_filled(
         card_rect,
@@ -290,24 +230,18 @@ where
         visuals.widgets.noninteractive.bg_fill,
     );
 
-    // Border: thicker + selection-coloured when selected, dim hover
-    // ring on pointer-over, faint otherwise.
-    let border_color = if selected {
-        visuals.selection.stroke.color
-    } else if response.hovered() {
+    let border_color = if response.hovered() {
         visuals.widgets.hovered.bg_stroke.color
     } else {
         visuals.widgets.noninteractive.bg_stroke.color
     };
-    let border_width = if selected { 2.0 } else { 1.0 };
     ui.painter().rect_stroke(
         card_rect,
         egui::CornerRadius::same(4),
-        egui::Stroke::new(border_width, border_color),
+        egui::Stroke::new(1.0, border_color),
         egui::StrokeKind::Inside,
     );
 
-    // Image area: 3:2, leaving room for the label strip.
     let image_rect = egui::Rect::from_min_size(
         card_rect.min + egui::vec2(INNER_MARGIN, INNER_MARGIN),
         egui::vec2(cell_w - INNER_MARGIN * 2.0, image_h),
@@ -323,7 +257,6 @@ where
         textures,
     );
 
-    // Label strip (only rendered when there is text to show).
     if show_label {
         let label_rect = egui::Rect::from_min_size(
             egui::pos2(card_rect.min.x + INNER_MARGIN, image_rect.max.y + 1.0),
@@ -479,7 +412,7 @@ pub struct GridItem {
     /// Visual / behavioural config for this cell.
     pub config: ThumbCardConfig,
     /// Screen-space rectangle of the card, updated by the renderer
-    /// each frame. Useful for hit-testing (rubber-band selection).
+    /// each frame.
     pub rect: egui::Rect,
 }
 
@@ -510,22 +443,17 @@ pub fn show_thumb_grid<K, F>(
     textures: &Mutex<HashMap<K, egui::TextureHandle>>,
     max_height: f32,
     key_for: F,
-) -> (Vec<i64>, bool)
+) -> Vec<i64>
 where
     K: std::hash::Hash + Eq + Copy + std::fmt::Display + Send,
     F: Fn(&GridItem) -> K,
 {
-    let mut remove_ids = Vec::new();
-    let mut batch = false;
     let scroll = egui::ScrollArea::vertical()
         .max_height(max_height)
         .auto_shrink([false, false]);
     scroll.show(ui, |ui| {
-        let result = show_thumb_rows(ctx, ui, items, textures, key_for);
-        remove_ids = result.0;
-        batch = result.1;
-    });
-    (remove_ids, batch)
+        show_thumb_rows(ctx, ui, items, textures, key_for)
+    }).inner
 }
 
 /// Row-by-row thumbnail grid rendering without a scroll wrapper.
@@ -541,7 +469,7 @@ pub(crate) fn show_thumb_rows<K, F>(
     items: &mut [GridItem],
     textures: &Mutex<HashMap<K, egui::TextureHandle>>,
     key_for: F,
-) -> (Vec<i64>, bool)
+) -> Vec<i64>
 where
     K: std::hash::Hash + Eq + Copy + std::fmt::Display + Send,
     F: Fn(&GridItem) -> K,
@@ -549,16 +477,12 @@ where
     let layout = compute_grid(ui);
     let n = items.len();
     let mut remove_ids = Vec::new();
-    let mut batch_remove_requested = false;
 
     for (row_idx, row_start) in (0..n).step_by(layout.cells_per_row).enumerate() {
         let row_end = (row_start + layout.cells_per_row).min(n);
         let in_row = row_end - row_start;
         let row_w = in_row as f32 * layout.cell_pitch - COL_SPACING;
         let available = ui.available_width();
-        // Use the wider of "what a full row needs" and "what
-        // this row actually has" so the centering math stays
-        // stable across the full/partial transition.
         let reference_w = layout.full_row_w.max(row_w);
         let pad = ((available - reference_w) * 0.5).max(0.0);
 
@@ -574,7 +498,7 @@ where
                     ctx,
                     ui,
                     cache_key,
-                    &mut item.config,
+                    &item.config,
                     bytes,
                     error,
                     &path,
@@ -585,19 +509,15 @@ where
                 if resp.remove_requested && let Some(id) = item.id {
                     remove_ids.push(id);
                 }
-                if resp.batch_remove_requested {
-                    batch_remove_requested = true;
-                }
             }
         });
         let _ = resp;
-        // Spacing between rows.
         if row_idx + 1 < n.div_ceil(layout.cells_per_row) {
             ui.add_space(ROW_SPACING);
         }
     }
 
-    (remove_ids, batch_remove_requested)
+    remove_ids
 }
 
 /// Open the system's file manager at the folder containing `path` and
