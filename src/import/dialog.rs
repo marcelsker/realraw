@@ -521,6 +521,7 @@ impl ImportDialog {
                     selected: f.selected,
                     in_catalog: f.already_in_catalog,
                     label_override: None,
+                    selected_count: 0,
                 },
                 rect: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::ZERO),
             })

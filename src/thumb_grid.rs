@@ -74,6 +74,9 @@ pub struct ThumbCardConfig {
     /// If `Some`, use this text as the label instead of the
     /// caller's filename.
     pub label_override: Option<String>,
+    /// How many items are currently selected in the parent view.
+    /// Used to decide whether to show the batch context menu.
+    pub selected_count: usize,
 }
 
 impl Default for ThumbCardConfig {
@@ -84,6 +87,7 @@ impl Default for ThumbCardConfig {
             selected: false,
             in_catalog: false,
             label_override: None,
+            selected_count: 0,
         }
     }
 }
@@ -100,6 +104,10 @@ pub struct CardResponse {
     /// `true` if the user clicked "Remove" in the card's context
     /// menu. The caller should handle the removal flow.
     pub remove_requested: bool,
+    /// `true` if the user clicked "Remove N items" in the batch
+    /// context menu (card is selected as part of a multi-selection).
+    /// The caller should remove all currently selected items.
+    pub batch_remove_requested: bool,
     /// Screen-space rectangle of the card, in the caller's coordinate
     /// space. Useful for hit-testing (rubber-band selection, etc.).
     pub rect: egui::Rect,
@@ -111,6 +119,7 @@ impl Default for CardResponse {
             clicked: false,
             hovered: false,
             remove_requested: false,
+            batch_remove_requested: false,
             rect: egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::ZERO),
         }
     }
@@ -238,18 +247,26 @@ where
     // manager — the `open` crate only opens the parent folder without
     // selection, so we use platform-specific commands instead.
     let remove_clicked = std::cell::Cell::new(false);
+    let batch_remove_clicked = std::cell::Cell::new(false);
     response.context_menu(|ui| {
-        if ui.button("Open").clicked() {
-            eprintln!("context menu: Open (not implemented)");
-            ui.close_menu();
-        }
-        if item_id.is_some() && ui.button("Remove").clicked() {
-            remove_clicked.set(true);
-            ui.close_menu();
-        }
-        if ui.button("Reveal").clicked() {
-            reveal_in_file_manager(full_path);
-            ui.close_menu();
+        if config.selected && config.selected_count > 1 {
+            if ui.button("Remove").clicked() {
+                batch_remove_clicked.set(true);
+                ui.close_menu();
+            }
+        } else {
+            if ui.button("Open").clicked() {
+                eprintln!("context menu: Open (not implemented)");
+                ui.close_menu();
+            }
+            if item_id.is_some() && ui.button("Remove").clicked() {
+                remove_clicked.set(true);
+                ui.close_menu();
+            }
+            if ui.button("Reveal").clicked() {
+                reveal_in_file_manager(full_path);
+                ui.close_menu();
+            }
         }
     });
 
@@ -257,6 +274,7 @@ where
         clicked: response.clicked() && config.selectable && !config.in_catalog,
         hovered: response.hovered(),
         remove_requested: remove_clicked.get(),
+        batch_remove_requested: batch_remove_clicked.get(),
         rect: card_rect,
     };
 
@@ -492,19 +510,22 @@ pub fn show_thumb_grid<K, F>(
     textures: &Mutex<HashMap<K, egui::TextureHandle>>,
     max_height: f32,
     key_for: F,
-) -> Vec<i64>
+) -> (Vec<i64>, bool)
 where
     K: std::hash::Hash + Eq + Copy + std::fmt::Display + Send,
     F: Fn(&GridItem) -> K,
 {
     let mut remove_ids = Vec::new();
+    let mut batch = false;
     let scroll = egui::ScrollArea::vertical()
         .max_height(max_height)
         .auto_shrink([false, false]);
     scroll.show(ui, |ui| {
-        remove_ids = show_thumb_rows(ctx, ui, items, textures, key_for);
+        let result = show_thumb_rows(ctx, ui, items, textures, key_for);
+        remove_ids = result.0;
+        batch = result.1;
     });
-    remove_ids
+    (remove_ids, batch)
 }
 
 /// Row-by-row thumbnail grid rendering without a scroll wrapper.
@@ -520,7 +541,7 @@ pub(crate) fn show_thumb_rows<K, F>(
     items: &mut [GridItem],
     textures: &Mutex<HashMap<K, egui::TextureHandle>>,
     key_for: F,
-) -> Vec<i64>
+) -> (Vec<i64>, bool)
 where
     K: std::hash::Hash + Eq + Copy + std::fmt::Display + Send,
     F: Fn(&GridItem) -> K,
@@ -528,6 +549,7 @@ where
     let layout = compute_grid(ui);
     let n = items.len();
     let mut remove_ids = Vec::new();
+    let mut batch_remove_requested = false;
 
     for (row_idx, row_start) in (0..n).step_by(layout.cells_per_row).enumerate() {
         let row_end = (row_start + layout.cells_per_row).min(n);
@@ -563,6 +585,9 @@ where
                 if resp.remove_requested && let Some(id) = item.id {
                     remove_ids.push(id);
                 }
+                if resp.batch_remove_requested {
+                    batch_remove_requested = true;
+                }
             }
         });
         let _ = resp;
@@ -572,7 +597,7 @@ where
         }
     }
 
-    remove_ids
+    (remove_ids, batch_remove_requested)
 }
 
 /// Open the system's file manager at the folder containing `path` and

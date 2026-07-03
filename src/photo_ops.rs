@@ -77,9 +77,58 @@ pub fn spawn_delete_task(
     tid
 }
 
+/// Spawn a group of background tasks that delete multiple photos
+/// from the catalog, each with its own progress entry.
+pub fn spawn_batch_delete_tasks(
+    mgr: &mut TaskManager,
+    catalog: Arc<Catalog>,
+    ids: &[i64],
+    paths: &[String],
+) -> TaskId {
+    let group_id = mgr.add_group(
+        format!("Remove {} photos", ids.len()),
+        None,
+    );
+    let mut last_tid = None;
+    for (photo_id, path) in ids.iter().zip(paths.iter()) {
+        let filename = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("#{photo_id}"));
+        let cat = catalog.clone();
+        let pid = *photo_id;
+        let task = Task::new(
+            format!("Remove {filename}"),
+            format!("Delete photo #{pid} from catalog"),
+        )
+        .group(group_id)
+        .work(move |_ctx: &TaskContext| {
+            let deleted = cat
+                .delete_photo(pid)
+                .map_err(|e| format!("DB delete failed: {e}"))?;
+            if deleted {
+                let thumb_path = thumbnail_cache::thumbnail_path(cat.dir(), pid);
+                let _ = std::fs::remove_file(&thumb_path);
+            }
+            Ok(())
+        });
+        last_tid = Some(mgr.add_task(task));
+    }
+    mgr.start();
+    last_tid.unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // Remove-confirmation dialog
 // ---------------------------------------------------------------------------
+
+/// A pending or in-progress removal request, either for a single
+/// photo or a batch of selected photos.
+#[derive(Clone)]
+struct RemoveRequest {
+    ids: Vec<i64>,
+    paths: Vec<String>,
+}
 
 /// State for the "Remove photo?" confirmation dialog.
 ///
@@ -87,15 +136,24 @@ pub fn spawn_delete_task(
 /// (e.g. from a context menu), then call [`show`][Self::show] every
 /// frame. The dialog handles the confirmation, spawns a background
 /// task for the deletion, and reports completion.
-#[derive(Default)]
 pub struct RemoveDialog {
-    /// `Some((photo_id, path))` while the confirmation dialog is visible.
-    pub pending: Option<(i64, String)>,
+    /// Pending removal request while the confirmation dialog is visible.
+    pending: Option<RemoveRequest>,
     /// Error message to display inside the dialog, if the last
     /// operation failed.
     error: Option<String>,
     /// Task id of the in-flight deletion, if any.
     task_id: Option<TaskId>,
+}
+
+impl Default for RemoveDialog {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            error: None,
+            task_id: None,
+        }
+    }
 }
 
 impl RemoveDialog {
@@ -109,7 +167,27 @@ impl RemoveDialog {
         if self.pending.is_some() || self.task_id.is_some() {
             return;
         }
-        self.pending = Some((photo_id, path.to_owned()));
+        self.pending = Some(RemoveRequest {
+            ids: vec![photo_id],
+            paths: vec![path.to_owned()],
+        });
+        self.error = None;
+    }
+
+    /// Request removal of multiple photos at once. Opens the
+    /// confirmation dialog on the next [`show`][Self::show] call.
+    ///
+    /// Only one removal can be in-flight at a time; subsequent
+    /// requests while a dialog is pending or a task is running are
+    /// silently ignored.
+    pub fn request_batch(&mut self, ids: &[i64], paths: &[String]) {
+        if self.pending.is_some() || self.task_id.is_some() {
+            return;
+        }
+        self.pending = Some(RemoveRequest {
+            ids: ids.to_vec(),
+            paths: paths.to_vec(),
+        });
         self.error = None;
     }
 
@@ -146,7 +224,7 @@ impl RemoveDialog {
         }
 
         // --- show confirmation dialog --------------------------------------
-        let Some((photo_id, ref path)) = self.pending.clone() else {
+        let Some(req) = self.pending.clone() else {
             return Ok(false);
         };
 
@@ -157,19 +235,28 @@ impl RemoveDialog {
             ui.vertical_centered(|ui| {
                 ui.heading("Remove photo");
                 ui.add_space(4.0);
-                ui.label("Are you sure you want to remove this photo?");
-                ui.label(
-                    egui::RichText::new(
-                        Path::new(&path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy())
-                            .unwrap_or_else(|| path.as_str().into()),
-                    )
-                    .size(14.0)
-                    .strong(),
-                );
+                if req.ids.len() > 1 {
+                    ui.label("Are you sure you want to remove these photos?");
+                    ui.label(
+                        egui::RichText::new(format!("You will remove {} files.", req.ids.len()))
+                            .size(14.0)
+                            .strong(),
+                    );
+                } else {
+                    ui.label("Are you sure you want to remove this photo?");
+                    ui.label(
+                        egui::RichText::new(
+                            Path::new(&req.paths[0])
+                                .file_name()
+                                .map(|n| n.to_string_lossy())
+                                .unwrap_or_else(|| req.paths[0].as_str().into()),
+                        )
+                        .size(14.0)
+                        .strong(),
+                    );
+                }
                 ui.add_space(4.0);
-                ui.label("The file on disk will not be affected.");
+                ui.label("The file(s) on disk will not be affected.");
                 ui.add_space(8.0);
 
                 if let Some(err) = &self.error {
@@ -201,9 +288,14 @@ impl RemoveDialog {
             self.pending = None;
             self.error = None;
         } else if confirmed {
-            let cat = catalog.clone();
-            let tid = spawn_delete_task(mgr, cat, photo_id, path);
-            self.task_id = Some(tid);
+            if req.ids.len() > 1 {
+                let tid = spawn_batch_delete_tasks(mgr, catalog.clone(), &req.ids, &req.paths);
+                self.task_id = Some(tid);
+            } else {
+                let cat = catalog.clone();
+                let tid = spawn_delete_task(mgr, cat, req.ids[0], &req.paths[0]);
+                self.task_id = Some(tid);
+            }
             self.pending = None;
             self.error = None;
         }

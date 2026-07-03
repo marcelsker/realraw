@@ -153,6 +153,9 @@ pub struct LibraryPage {
     rubber_band_current: Option<egui::Pos2>,
     /// Whether a rubber-band drag is currently active.
     rubber_band_active: bool,
+    /// Set when the context menu fires a batch remove request.
+    /// Reset after processing.
+    batch_remove_requested: bool,
 }
 
 /// Per-photo thumbnail state held in the library's `HashMap`.
@@ -196,6 +199,7 @@ impl Default for LibraryPage {
             rubber_band_origin: None,
             rubber_band_current: None,
             rubber_band_active: false,
+            batch_remove_requested: false,
         }
     }
 }
@@ -353,12 +357,13 @@ impl LibraryPage {
                                 selected: self.selected_ids.contains(&p.id),
                                 in_catalog: false,
                                 label_override: None,
+                                selected_count: self.selected_ids.len(),
                             },
                         }
                     })
                     .collect();
 
-                let group_removed = thumb_grid::show_thumb_rows(
+                let (group_removed, group_batch) = thumb_grid::show_thumb_rows(
                     ctx,
                     ui,
                     &mut items,
@@ -369,6 +374,9 @@ impl LibraryPage {
                     },
                 );
                 remove_ids.extend(group_removed);
+                if group_batch {
+                    self.batch_remove_requested = true;
+                }
 
                 // Sync click-to-select changes back to selected_ids.
                 for item in &items {
@@ -482,6 +490,19 @@ impl LibraryPage {
         }
 
         // Handle any remove requests from the context menu.
+        if self.batch_remove_requested {
+            self.batch_remove_requested = false;
+            let ids: Vec<i64> = self.selected_ids.iter().copied().collect();
+            let paths: Vec<String> = self
+                .photos
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .map(|p| p.path.clone())
+                .collect();
+            if !ids.is_empty() {
+                self.remove_dialog.request_batch(&ids, &paths);
+            }
+        }
         for id in remove_ids {
             if let Some(photo) = self.photos.iter().find(|p| p.id == id) {
                 self.remove_dialog.request(id, &photo.path);
