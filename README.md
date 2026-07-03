@@ -6,6 +6,9 @@
 
 An open-source Lightroom alternative, written in Rust.
 
+## Nightly Builds
+https://realraw.sker.lol
+
 ## Features
 
 - **photo library management via collections** -- stores photos in a collection which can easily be migrated to another device or an external drive.
