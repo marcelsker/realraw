@@ -167,9 +167,10 @@ impl CacheKey {
     /// default hasher for speed; the values are process-local so
     /// we don't need cryptographic strength.
     pub fn from_path(path: &str) -> Self {
-        use std::hash::{BuildHasher, Hasher, RandomState};
-        let mut h = RandomState::new().build_hasher();
-        h.write(path.as_bytes());
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        path.hash(&mut h);
         CacheKey(h.finish())
     }
 
