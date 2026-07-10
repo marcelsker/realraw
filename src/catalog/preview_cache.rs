@@ -137,9 +137,12 @@ pub fn save_linear(
         f.write_all(&linear.height.to_le_bytes())?;
         f.write_all(&orientation.unwrap_or(0).to_le_bytes())?;
         f.write_all(&PREVIEW_MAX_DIM.to_le_bytes())?;
-        for v in &linear.rgb {
-            f.write_all(&v.to_le_bytes())?;
+        // One bulk write — per-float write_all was millions of syscalls.
+        let mut bytes = Vec::with_capacity(linear.rgb.len() * 4);
+        for &v in &linear.rgb {
+            bytes.extend_from_slice(&v.to_le_bytes());
         }
+        f.write_all(&bytes)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &target)?;

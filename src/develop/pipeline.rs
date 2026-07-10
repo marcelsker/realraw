@@ -34,10 +34,23 @@ pub fn develop_linear(
     path: &Path,
     orientation: Option<i64>,
 ) -> Result<LinearPreview, DecodeError> {
+    develop_linear_with_progress(path, orientation, &mut |_| {})
+}
+
+/// Same as [`develop_linear`], reporting coarse stage progress via
+/// `on_progress` (`0.0..=1.0`). Stages: decode → demosaic → orient → downscale.
+pub fn develop_linear_with_progress(
+    path: &Path,
+    orientation: Option<i64>,
+    on_progress: &mut dyn FnMut(f32),
+) -> Result<LinearPreview, DecodeError> {
     if !super::decode::is_raw_path(path) {
         return Err(DecodeError::NotRaw);
     }
-    match panic::catch_unwind(AssertUnwindSafe(|| develop_linear_inner(path, orientation))) {
+    on_progress(0.0);
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        develop_linear_inner(path, orientation, on_progress)
+    })) {
         Ok(result) => result,
         Err(_) => Err(DecodeError::Raw(
             "rawler linear develop panicked (unsupported or corrupt file)".into(),
@@ -48,8 +61,11 @@ pub fn develop_linear(
 fn develop_linear_inner(
     path: &Path,
     orientation: Option<i64>,
+    on_progress: &mut dyn FnMut(f32),
 ) -> Result<LinearPreview, DecodeError> {
+    on_progress(0.05);
     let raw = rawler::decode_file(path).map_err(|e| DecodeError::Raw(e.to_string()))?;
+    on_progress(0.15);
 
     let ori = orientation.or_else(|| {
         let u = raw.orientation.to_u16();
@@ -72,17 +88,26 @@ fn develop_linear_inner(
         ],
     };
 
+    // Bulk of the work (rawler demosaic + WB + calibrate).
+    // Cap at ~0.80 so the worker can still report cache/tone work after.
+    on_progress(0.2);
     let intermediate = dev
         .develop_intermediate(&raw)
         .map_err(|e| DecodeError::Raw(e.to_string()))?;
+    on_progress(0.65);
 
     let (mut width, mut height, mut rgb) = intermediate_to_rgb_f32(intermediate)?;
+    on_progress(0.68);
     let (w2, h2, rgb2) = apply_orientation_rgb(rgb, width, height, ori.unwrap_or(1));
     width = w2;
     height = h2;
     rgb = rgb2;
+    on_progress(0.72);
 
-    let (w3, h3, rgb3) = downscale_rgb(&rgb, width, height, PREVIEW_MAX_DIM);
+    // Box-filter downsample is CPU-heavy on full-res demosaic; report rows.
+    let (w3, h3, rgb3) =
+        downscale_rgb_with_progress(&rgb, width, height, PREVIEW_MAX_DIM, on_progress, 0.72, 0.95);
+    on_progress(0.95);
     Ok(LinearPreview {
         width: w3,
         height: h3,
@@ -278,15 +303,25 @@ fn apply_orientation_rgb(
     }
 }
 
-fn downscale_rgb(rgb: &[f32], width: u32, height: u32, max_dim: u32) -> (u32, u32, Vec<f32>) {
+/// Box-filter downsample; maps row progress into `[p0, p1]` via `on_progress`.
+fn downscale_rgb_with_progress(
+    rgb: &[f32],
+    width: u32,
+    height: u32,
+    max_dim: u32,
+    on_progress: &mut dyn FnMut(f32),
+    p0: f32,
+    p1: f32,
+) -> (u32, u32, Vec<f32>) {
     if width <= max_dim && height <= max_dim {
         return (width, height, rgb.to_vec());
     }
-    // Box-filter downsample (good enough for linear preview).
     let scale = (max_dim as f32 / width.max(height) as f32).min(1.0);
     let nw = ((width as f32 * scale).round() as u32).max(1);
     let nh = ((height as f32 * scale).round() as u32).max(1);
     let mut out = vec![0.0f32; (nw * nh * 3) as usize];
+    // Report every ~2% of output rows to keep the bar moving without flooding.
+    let report_every = (nh / 50).max(1);
     for y in 0..nh {
         let y0 = (y as u64 * height as u64 / nh as u64) as u32;
         let y1 = (((y as u64 + 1) * height as u64 / nh as u64) as u32).max(y0 + 1);
@@ -310,6 +345,10 @@ fn downscale_rgb(rgb: &[f32], width: u32, height: u32, max_dim: u32) -> (u32, u3
                 out[o + 1] = acc[1] / count;
                 out[o + 2] = acc[2] / count;
             }
+        }
+        if y % report_every == 0 || y + 1 == nh {
+            let t = (y + 1) as f32 / nh as f32;
+            on_progress(p0 + (p1 - p0) * t);
         }
     }
     (nw, nh, out)

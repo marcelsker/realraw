@@ -326,6 +326,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
         app.develop_preview.set_view_size(avail, ppp);
 
         let loading = app.develop_preview.is_loading();
+        let demosaic_progress = app.develop_preview.demosaic_progress();
         let status = app.develop_preview.status.clone();
         let tex_info = app
             .develop_preview
@@ -337,7 +338,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
             .map(|t| t.id());
         let reveal_alpha = app.develop_preview.reveal_alpha();
 
-        if loading || reveal_alpha.is_some() {
+        if loading || reveal_alpha.is_some() || demosaic_progress.is_some() {
             ctx.request_repaint();
         }
 
@@ -370,7 +371,9 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     }
                 }
             });
-            if loading {
+            if let Some(p) = demosaic_progress {
+                paint_demosaic_progress(ui, p);
+            } else if loading {
                 let origin = ui.min_rect().left_top() + egui::vec2(8.0, 8.0);
                 let text = loading_dots(ctx);
                 ui.allocate_new_ui(
@@ -383,6 +386,19 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     },
                 );
             }
+        } else if let Some(p) = demosaic_progress {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label("Demosaicing…");
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::ProgressBar::new(p)
+                            .desired_width(280.0)
+                            .show_percentage()
+                            .animate(true),
+                    );
+                });
+            });
         } else if let Some(status) = status {
             ui.centered_and_justified(|ui| {
                 if loading {
@@ -400,4 +416,24 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
             });
         }
     });
+}
+
+/// Top-left overlay progress while demosaic is running over a placeholder.
+fn paint_demosaic_progress(ui: &mut egui::Ui, progress: f32) {
+    let origin = ui.min_rect().left_top() + egui::vec2(8.0, 8.0);
+    ui.allocate_new_ui(
+        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+            origin,
+            egui::vec2(280.0, 40.0),
+        )),
+        |ui| {
+            ui.label(egui::RichText::new("Demosaicing…").small().weak());
+            ui.add(
+                egui::ProgressBar::new(progress)
+                    .desired_width(260.0)
+                    .show_percentage()
+                    .animate(true),
+            );
+        },
+    );
 }

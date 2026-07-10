@@ -18,7 +18,7 @@ use eframe::egui;
 use super::decode::{
     decode_embedded_preview, decode_raw_preview, PreviewImage, PreviewSource, PREVIEW_MAX_DIM,
 };
-use super::pipeline::{apply_exposure, develop_linear, LinearPreview};
+use super::pipeline::{apply_exposure, develop_linear_with_progress, LinearPreview};
 use crate::catalog::{preview_cache, thumbnail_cache};
 
 /// Crossfade duration from thumbnail → demosaic (seconds).
@@ -33,6 +33,8 @@ struct PreviewResult {
 
 enum ResultKind {
     Placeholder(PreviewImage),
+    /// Actual demosaic is running (not a linear-cache hit). `0.0..=1.0`.
+    DemosaicProgress(f32),
     /// Linear buffer ready + first toned display image.
     LinearReady {
         linear: Arc<LinearPreview>,
@@ -73,6 +75,9 @@ pub struct DevelopPreview {
     pub status: Option<String>,
     loading: bool,
     settled: bool,
+    /// Coarse demosaic progress while rawler is running. `None` for
+    /// linear-cache hits, idle, or after settle.
+    demosaic_progress: Option<f32>,
     /// Linear demosaic buffer for the current photo (pre-exposure).
     linear: Option<Arc<LinearPreview>>,
     /// Current exposure in EV stops.
@@ -106,6 +111,7 @@ impl Default for DevelopPreview {
             status: None,
             loading: false,
             settled: false,
+            demosaic_progress: None,
             linear: None,
             exposure: 0.0,
             dragging: false,
@@ -160,6 +166,7 @@ impl DevelopPreview {
         self.tone_dirty = false;
         self.loading = true;
         self.settled = false;
+        self.demosaic_progress = None;
 
         let job_gen = self.generation;
         let tx = self.tx.clone();
@@ -199,40 +206,72 @@ impl DevelopPreview {
 
                 // Phase 2: linear demosaic — prefer on-disk linear cache so we
                 // do not re-run rawler when reopening the same photo.
+                // Progress is only reported on a real demosaic (cache miss).
+                let mut demosaic_report: Option<Box<dyn FnMut(f32)>> = None;
                 let linear = match preview_cache::load_linear(&catalog_dir, photo_id, orientation)
                 {
                     Some(lin) => Ok(lin),
-                    None => develop_linear(&path, orientation).inspect(|lin| {
-                        if let Err(e) =
-                            preview_cache::save_linear(&catalog_dir, photo_id, orientation, lin)
-                        {
-                            eprintln!("linear cache save failed for photo {photo_id}: {e}");
-                        }
-                    }),
+                    None => {
+                        let tx_p = tx.clone();
+                        let mut report = move |p: f32| {
+                            let _ = tx_p.send(PreviewResult {
+                                photo_id,
+                                generation: job_gen,
+                                kind: ResultKind::DemosaicProgress(p.clamp(0.0, 1.0)),
+                            });
+                        };
+                        let result =
+                            develop_linear_with_progress(&path, orientation, &mut report);
+                        demosaic_report = Some(Box::new(report));
+                        result
+                    }
                 };
 
                 match linear {
                     Ok(linear) => {
+                        // Tone the on-screen image first and deliver it so the
+                        // progress bar is not stuck on disk cache writes.
+                        if let Some(report) = demosaic_report.as_mut() {
+                            report(0.90);
+                        }
                         let dim = first_tone_dim
                             .min(linear.width.max(linear.height))
                             .max(1);
                         let display = apply_exposure(&linear, exposure, dim);
-                        // Cache a full-res EV-current preview for next open.
+                        if let Some(report) = demosaic_report.as_mut() {
+                            report(1.0);
+                        }
+                        let linear = Arc::new(linear);
+                        let _ = tx.send(PreviewResult {
+                            photo_id,
+                            generation: job_gen,
+                            kind: ResultKind::LinearReady {
+                                linear: Arc::clone(&linear),
+                                display,
+                                exposure_used: exposure,
+                            },
+                        });
+
+                        // Disk caches after the UI is unblocked.
+                        if demosaic_report.is_some() {
+                            if let Err(e) = preview_cache::save_linear(
+                                &catalog_dir,
+                                photo_id,
+                                orientation,
+                                &linear,
+                            ) {
+                                eprintln!(
+                                    "linear cache save failed for photo {photo_id}: {e}"
+                                );
+                            }
+                        }
+                        // Refresh EV-current JPEG placeholder for next open.
                         let cache_img = apply_exposure(&linear, exposure, PREVIEW_MAX_DIM);
                         if let Err(e) =
                             preview_cache::save_preview(&catalog_dir, photo_id, &cache_img)
                         {
                             eprintln!("preview cache save failed for photo {photo_id}: {e}");
                         }
-                        let _ = tx.send(PreviewResult {
-                            photo_id,
-                            generation: job_gen,
-                            kind: ResultKind::LinearReady {
-                                linear: Arc::new(linear),
-                                display,
-                                exposure_used: exposure,
-                            },
-                        });
                     }
                     Err(e) => {
                         eprintln!("linear develop failed for {}: {e}", path.display());
@@ -383,6 +422,7 @@ impl DevelopPreview {
         self.tone_dirty = false;
         self.loading = false;
         self.settled = true;
+        self.demosaic_progress = None;
         self.status = Some(message);
     }
 
@@ -401,6 +441,7 @@ impl DevelopPreview {
         self.status = None;
         self.loading = false;
         self.settled = false;
+        self.demosaic_progress = None;
     }
 
     /// Drain background results. Call once per frame.
@@ -429,12 +470,17 @@ impl DevelopPreview {
                         }
                     }
                 }
+                ResultKind::DemosaicProgress(p) => {
+                    self.demosaic_progress = Some(p.clamp(0.0, 1.0));
+                    self.status = Some("Demosaicing…".into());
+                }
                 ResultKind::LinearReady {
                     linear,
                     display,
                     exposure_used,
                 } => {
                     self.linear = Some(linear);
+                    self.demosaic_progress = None;
                     let has_placeholder = self.texture.is_some()
                         && matches!(
                             self.image.as_ref().map(|i| i.source),
@@ -467,6 +513,7 @@ impl DevelopPreview {
                 }
                 ResultKind::LinearFailed { error, fallback } => {
                     self.linear = None;
+                    self.demosaic_progress = None;
                     self.loading = false;
                     self.settled = true;
                     if let Some(img) = fallback {
@@ -521,7 +568,11 @@ impl DevelopPreview {
         if need_repaint {
             ctx.request_repaint();
         }
-        if self.loading || self.tone_inflight || self.fading() {
+        if self.loading
+            || self.tone_inflight
+            || self.fading()
+            || self.demosaic_progress.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -629,6 +680,12 @@ impl DevelopPreview {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// Demosaic stage progress (`0.0..=1.0`) while rawler is running.
+    /// `None` when idle, cache-hit, or finished.
+    pub fn demosaic_progress(&self) -> Option<f32> {
+        self.demosaic_progress
     }
 
     pub fn source(&self) -> Option<PreviewSource> {
