@@ -32,7 +32,8 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     let _ = app.library.show(ctx, ui, cat.clone(), &mut app.task_manager);
 
                     // Navigate to Develop mode if a photo was double-clicked.
-                    if app.library.activated_id.is_some() {
+                    if let Some(id) = app.library.activated_id.take() {
+                        app.develop_photo_id = Some(id);
                         app.current_page = Page::Develop;
                     }
                 }

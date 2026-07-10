@@ -10,6 +10,7 @@ use eframe::egui;
 use crate::app::develop::DevelopSettings;
 use crate::app::library::LibraryPage;
 use crate::catalog::{Catalog, Counts};
+use crate::develop::DevelopPreview;
 use crate::import::{ImportDialog, ImportSummary, dialog::Phase as DialogPhase};
 use crate::task::{TaskManager, TaskSnapshot, TaskStatus};
 
@@ -61,6 +62,12 @@ pub struct App {
 
     /// Develop mode adjustment settings.
     pub develop: DevelopSettings,
+
+    /// Photo currently open in Develop (catalog id).
+    pub develop_photo_id: Option<i64>,
+
+    /// Progressive RAW preview for Develop mode.
+    pub develop_preview: DevelopPreview,
 
     /// The library page: thumbnail grid of every photo in the catalog.
     pub library: LibraryPage,
@@ -150,6 +157,8 @@ impl Default for App {
             import_dialog: None,
             current_page: Page::Library,
             develop: DevelopSettings::default(),
+            develop_photo_id: None,
+            develop_preview: DevelopPreview::default(),
             library: LibraryPage::default(),
             library_last_refresh_mtime_ms: None,
             library_needs_refresh: false,

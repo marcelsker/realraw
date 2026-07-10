@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use eframe::egui;
 
 use crate::app::App;
@@ -42,10 +44,7 @@ impl Default for DevelopSettings {
 fn slider(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>) {
     ui.horizontal(|ui| {
         ui.add_sized([80.0, 0.0], egui::Label::new(label));
-        ui.add(
-            egui::Slider::new(value, range)
-                .show_value(true),
-        );
+        ui.add(egui::Slider::new(value, range).show_value(true));
     });
 }
 
@@ -54,8 +53,47 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
     ui.separator();
 }
 
-/// Render the Develop page with adjustment sliders in a side panel.
+/// Ensure the develop preview is loading the currently selected photo.
+fn ensure_preview(app: &mut App) {
+    let Some(id) = app.develop_photo_id else {
+        if app.develop_preview.photo_id.is_some() {
+            app.develop_preview.clear();
+        }
+        return;
+    };
+
+    if app.develop_preview.is_active_for(id) {
+        return;
+    }
+
+    let Some(cat) = app.catalog.as_ref() else {
+        app.develop_preview.clear();
+        return;
+    };
+
+    match cat.find_photo_by_id(id) {
+        Ok(Some(photo)) => {
+            app.develop_preview.open(
+                id,
+                PathBuf::from(&photo.path),
+                photo.orientation,
+            );
+        }
+        Ok(None) => {
+            app.develop_preview.clear();
+            app.develop_photo_id = None;
+        }
+        Err(e) => {
+            app.develop_preview.fail(id, e.to_string());
+        }
+    }
+}
+
+/// Render the Develop page with adjustment sliders and RAW preview.
 pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
+    ensure_preview(app);
+    app.develop_preview.pump(ctx);
+
     // Right-side adjustment panel (rendered before CentralPanel so it
     // reserves space from the right edge).
     egui::SidePanel::right("develop_adjustments")
@@ -91,6 +129,57 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
             });
         });
 
-    // Central area (photo preview, empty for now).
-    egui::CentralPanel::default().show(ctx, |_ui| {});
+    egui::CentralPanel::default().show(ctx, |ui| {
+        if app.develop_photo_id.is_none() {
+            ui.centered_and_justified(|ui| {
+                ui.label("Double-click a RAW photo in the Library to open Develop.");
+            });
+            return;
+        }
+
+        let loading = app.develop_preview.is_loading();
+        let status = app.develop_preview.status.clone();
+        let tex_info = app
+            .develop_preview
+            .texture()
+            .map(|t| (t.id(), t.size_vec2()));
+
+        if let Some((tex_id, size)) = tex_info {
+            let avail = ui.available_size();
+            let scale = (avail.x / size.x).min(avail.y / size.y).min(1.0);
+            let display = size * scale;
+            ui.centered_and_justified(|ui| {
+                ui.image((tex_id, display));
+            });
+            if loading {
+                if let Some(status) = status {
+                    let origin = ui.min_rect().left_top() + egui::vec2(8.0, 8.0);
+                    ui.allocate_new_ui(
+                        egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                            origin,
+                            egui::vec2(320.0, 24.0),
+                        )),
+                        |ui| {
+                            ui.label(egui::RichText::new(status).small().weak());
+                        },
+                    );
+                }
+            }
+        } else if let Some(status) = status {
+            ui.centered_and_justified(|ui| {
+                if loading {
+                    ui.spinner();
+                    ui.add_space(8.0);
+                    ui.label(status);
+                } else {
+                    ui.colored_label(egui::Color32::LIGHT_RED, status);
+                }
+            });
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label("Loading…");
+            });
+        }
+    });
 }

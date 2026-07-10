@@ -9,10 +9,12 @@
 //!   both the import dialog and the main library page.
 //! * [`import`] -- photo import pipeline: discovery, EXIF, embedded
 //!   thumbnails, and the in-window import dialog.
+//! * [`develop`] -- RAW develop preview (embedded JPEG + demosaic).
 //! * [`app`] -- top-level `App` state + eframe integration.
 
 pub mod app;
 pub mod catalog;
+pub mod develop;
 pub mod import;
 pub mod photo_ops;
 pub mod task;
