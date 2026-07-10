@@ -30,6 +30,8 @@ const RAW_EXTENSIONS: &[&str] = &[
 /// Where the preview pixels came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewSource {
+    /// Library disk cache (`Thumbnails/{shard}/{id}.jpg`).
+    CachedThumb,
     /// Camera-embedded JPEG (or scanned JPEG block).
     Embedded,
     /// Full rawler demosaic pipeline.

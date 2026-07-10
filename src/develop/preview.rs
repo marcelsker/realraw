@@ -9,6 +9,7 @@ use eframe::egui;
 use super::decode::{
     decode_embedded_preview, decode_raw_preview, PreviewImage, PreviewSource,
 };
+use crate::catalog::thumbnail_cache;
 
 /// Result delivered from a background decode job.
 struct PreviewResult {
@@ -18,7 +19,8 @@ struct PreviewResult {
 }
 
 enum ResultKind {
-    Embedded(PreviewImage),
+    /// Fast first paint (disk cache or embedded JPEG).
+    Placeholder(PreviewImage),
     Final(Result<PreviewImage, String>),
 }
 
@@ -26,7 +28,7 @@ enum ResultKind {
 pub struct DevelopPreview {
     pub photo_id: Option<i64>,
     generation: u64,
-    /// Latest decoded image (embedded or demosaic).
+    /// Latest decoded image (cache / embedded / demosaic).
     image: Option<PreviewImage>,
     /// GPU texture for `image`.
     texture: Option<egui::TextureHandle>,
@@ -63,8 +65,19 @@ impl DevelopPreview {
         self.photo_id == Some(photo_id) && (self.loading || self.settled || self.image.is_some())
     }
 
-    /// Start loading `photo_id` from `path`. Cancels prior work via generation.
-    pub fn open(&mut self, photo_id: i64, path: PathBuf, orientation: Option<i64>) {
+    /// Start loading `photo_id`.
+    ///
+    /// Progressive:
+    /// 1. Library `Thumbnails/` cache (fast, already generated)
+    /// 2. Else embedded JPEG from the RAW
+    /// 3. Full demosaic develop (authoritative)
+    pub fn open(
+        &mut self,
+        photo_id: i64,
+        path: PathBuf,
+        orientation: Option<i64>,
+        catalog_dir: PathBuf,
+    ) {
         if self.is_active_for(photo_id) {
             return;
         }
@@ -91,12 +104,16 @@ impl DevelopPreview {
         thread::Builder::new()
             .name("develop-preview".into())
             .spawn(move || {
-                // Phase 1: embedded JPEG for fast first paint.
-                if let Ok(img) = decode_embedded_preview(&path, orientation) {
+                // Phase 1: prefer the library disk cache (same image as
+                // the grid), then fall back to extracting from the RAW.
+                let placeholder = load_cached_thumb(&catalog_dir, photo_id).or_else(|| {
+                    decode_embedded_preview(&path, orientation).ok()
+                });
+                if let Some(img) = placeholder {
                     let _ = tx.send(PreviewResult {
                         photo_id,
                         generation: job_gen,
-                        kind: ResultKind::Embedded(img),
+                        kind: ResultKind::Placeholder(img),
                     });
                 }
 
@@ -143,8 +160,8 @@ impl DevelopPreview {
             }
             need_repaint = true;
             match r.kind {
-                ResultKind::Embedded(img) => {
-                    // Only apply embedded if we don't already have demosaic.
+                ResultKind::Placeholder(img) => {
+                    // Only apply placeholder if we don't already have demosaic.
                     let replace = match &self.image {
                         None => true,
                         Some(cur) => cur.source != PreviewSource::Demosaic
@@ -169,7 +186,7 @@ impl DevelopPreview {
                     if self.image.is_none() {
                         self.status = Some(e);
                     } else {
-                        // Keep embedded preview; clear loading status.
+                        // Keep placeholder; clear loading status.
                         self.status = None;
                     }
                 }
@@ -209,4 +226,17 @@ impl DevelopPreview {
     pub fn source(&self) -> Option<PreviewSource> {
         self.image.as_ref().map(|i| i.source)
     }
+}
+
+fn load_cached_thumb(catalog_dir: &std::path::Path, photo_id: i64) -> Option<PreviewImage> {
+    let bytes = thumbnail_cache::load_thumbnail(catalog_dir, photo_id)?;
+    if bytes.rgba.is_empty() || bytes.width == 0 || bytes.height == 0 {
+        return None;
+    }
+    Some(PreviewImage {
+        width: bytes.width,
+        height: bytes.height,
+        rgba: bytes.rgba,
+        source: PreviewSource::CachedThumb,
+    })
 }

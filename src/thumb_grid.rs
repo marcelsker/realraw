@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use eframe::egui;
 
 /// Target longest edge for the decoded thumbnail, in pixels.
-pub const THUMB_MAX_DIM: u32 = 256;
+pub const THUMB_MAX_DIM: u32 = 1024;
 
 /// Pixel size of the longest edge of every cell in the grid.
 pub const THUMB_CELL: f32 = 156.0;

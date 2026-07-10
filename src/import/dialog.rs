@@ -47,8 +47,9 @@ use crate::import::discovery::{DiscoveredFile, KNOWN_EXTENSIONS};
 use crate::import::thumbnail::{extract_dialog_preview, Thumbnail};
 use crate::import::worker::{import_batch, ImportFile, ImportSummary};
 use crate::import::ImportAction;
-/// Maximum number of outstanding thumbnail requests.
-const MAX_INFLIGHT_THUMBS: usize = 48;
+/// Maximum number of outstanding thumbnail requests. Keep modest so
+/// we don't thrash disk with dozens of concurrent 64 MiB raw scans.
+const MAX_INFLIGHT_THUMBS: usize = 8;
 /// Number of cell-rows of buffer ahead of the visible area that we keep
 /// "queued for loading".
 const ROW_LOOKAHEAD: usize = 2;

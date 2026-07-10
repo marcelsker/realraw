@@ -73,10 +73,12 @@ fn ensure_preview(app: &mut App) {
 
     match cat.find_photo_by_id(id) {
         Ok(Some(photo)) => {
+            let catalog_dir = cat.dir().to_path_buf();
             app.develop_preview.open(
                 id,
                 PathBuf::from(&photo.path),
                 photo.orientation,
+                catalog_dir,
             );
         }
         Ok(None) => {
@@ -145,8 +147,10 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
             .map(|t| (t.id(), t.size_vec2()));
 
         if let Some((tex_id, size)) = tex_info {
+            // Scale to fit available area (allow upscale) so the library
+            // cache thumb and full demosaic fill the panel the same way.
             let avail = ui.available_size();
-            let scale = (avail.x / size.x).min(avail.y / size.y).min(1.0);
+            let scale = (avail.x / size.x).min(avail.y / size.y);
             let display = size * scale;
             ui.centered_and_justified(|ui| {
                 ui.image((tex_id, display));

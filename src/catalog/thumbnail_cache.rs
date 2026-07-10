@@ -7,7 +7,9 @@ use crate::thumb_grid::ThumbnailBytes;
 const THUMBS_DIR: &str = "Thumbnails";
 const FILES_PER_SHARD: i64 = 32;
 const JPEG_QUALITY: u8 = 85;
-const CACHE_MAX_DIM: u32 = 128;
+/// Longest edge of cached library thumbnails. Matches
+/// [`crate::import::thumbnail::THUMB_MAX_DIM`].
+const CACHE_MAX_DIM: u32 = 1024;
 
 /// Compute the shard folder index for a photo id.
 fn shard_id(photo_id: i64) -> i64 {
@@ -66,8 +68,8 @@ fn resize_thumbnail(thumb: &Thumbnail, max_dim: u32) -> Thumbnail {
     }
 }
 
-/// Save a thumbnail as JPEG to the disk cache at half resolution
-/// (CACHE_MAX_DIM = 128 px) with quality 85. Uses atomic write:
+/// Save a thumbnail as JPEG to the disk cache
+/// (`CACHE_MAX_DIM` long edge) with quality 85. Uses atomic write:
 /// temp file → rename.
 pub fn save_thumbnail(
     catalog_dir: &Path,
@@ -106,8 +108,8 @@ pub fn save_thumbnail(
 ///
 /// 1. Check the disk cache (`Thumbnails/{shard}/{photo_id}.jpg`).
 /// 2. On miss, extract from the source file via `extract_thumbnail`.
-/// 3. Resize to 128 px and save as a JPEG to the disk cache.
-/// 4. Return the 128 px result as `ThumbnailBytes`.
+/// 3. Resize to `CACHE_MAX_DIM` and save as a JPEG to the disk cache.
+/// 4. Return the cached-size result as `ThumbnailBytes`.
 pub fn get_or_generate(
     catalog_dir: &Path,
     photo_id: i64,
@@ -120,7 +122,6 @@ pub fn get_or_generate(
     let thumb = crate::import::thumbnail::extract_thumbnail(source_path)
         .map_err(|e| e.to_string())?;
 
-    // Resize to 128 px for caching and return.
     let small = resize_thumbnail(&thumb, CACHE_MAX_DIM);
 
     if let Err(e) = save_thumbnail(catalog_dir, photo_id, &thumb) {

@@ -2,18 +2,16 @@
 //!
 //! ## Strategy
 //!
-//! 1. **Embedded JPEG preview** (raw files): walk every IFD and look for
-//!    the largest JPEG segment. We verify the magic bytes (`FF D8 FF`)
-//!    before decoding so the `image` crate's format guesser doesn't
-//!    trip over a tiny CFA-format raw thumbnail.
-//! 2. **Scan the file** for the biggest JPEG block. Some cameras store
-//!    the preview without an EXIF tag pointing at it; scanning finds
-//!    them anyway.
-//! 3. **Full-file decode** for JPEGs, PNGs, and TIFFs (last resort).
-//!
-//! HEIF-based files (HEIC, AVIF, CR3) are *not* yet supported here;
-//! [`extract_thumbnail`] returns `Err(ThumbnailError::Unsupported)` for
-//! them. Adding `libheif-rs` later is the obvious next step.
+//! 1. **Largest embedded JPEG**: collect every EXIF-tagged
+//!    `JPEGInterchangeFormat` blob *and* every JPEG found by scanning
+//!    the file body, then decode the largest one. Cameras almost
+//!    always expose a tiny IFD1 thumb (~160×120) via EXIF and a much
+//!    larger preview (~1620×1080) only as an untagged blob — taking
+//!    the first EXIF hit is wrong.
+//! 2. **rawler decoder preview**: camera-aware RGB preview/thumbnail
+//!    (covers formats where JPEG scanning fails, e.g. some CR3s).
+//! 3. **Full-file decode** for JPEGs, PNGs, and TIFFs.
+//! 4. **rawler CFA fallback**: undemosaiced grayscale last resort.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -55,8 +53,15 @@ impl Thumbnail {
     }
 }
 
-/// Target longest edge for the decoded thumbnail, in pixels.
-pub const THUMB_MAX_DIM: u32 = 256;
+/// Target longest edge for library / disk-cache thumbnails.
+pub const THUMB_MAX_DIM: u32 = 1024;
+
+/// Target longest edge for import-dialog grid thumbs (cells are ~156 px).
+pub const DIALOG_THUMB_MAX_DIM: u32 = 256;
+
+/// EXIF JPEG blobs at least this large are treated as real previews
+/// (not tiny IFD1 thumbs), so we can skip the expensive 64 MiB file scan.
+const GOOD_PREVIEW_MIN_BYTES: u64 = 32 * 1024;
 
 /// Errors from thumbnail extraction.
 #[derive(Debug, thiserror::Error)]
@@ -86,127 +91,129 @@ pub enum ThumbnailError {
 /// Try every strategy to produce a thumbnail. Returns `Err` only if
 /// nothing worked.
 pub fn extract_thumbnail(path: &Path) -> Result<Thumbnail, ThumbnailError> {
-    // Strategy 1: read every JPEGInterchangeFormat tag across IFDs and
-    // pick the first one whose data starts with JPEG magic.
-    if let Ok(t) = extract_embedded(path) {
+    extract_thumbnail_sized(path, THUMB_MAX_DIM)
+}
+
+/// Extract a preview for the import dialog: same strategies as
+/// [`extract_thumbnail`], but capped at [`DIALOG_THUMB_MAX_DIM`] so the
+/// grid stays responsive.
+pub fn extract_dialog_preview(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+    extract_thumbnail_sized(path, DIALOG_THUMB_MAX_DIM)
+}
+
+fn extract_thumbnail_sized(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
+    // Strategy 1: largest embedded JPEG (EXIF tags + optional file scan).
+    if let Ok(t) = extract_largest_preview_jpeg(path, max_dim) {
         return Ok(t);
     }
 
-    // Strategy 2: scan the file for the biggest JPEG block.
-    if let Ok(t) = scan_for_largest_jpeg(path) {
+    // Strategy 2: rawler's camera-aware RGB preview (CR3, etc.).
+    if let Ok(t) = extract_rawler_preview(path, max_dim) {
         return Ok(t);
     }
 
     // Strategy 3: full-file decode for JPEGs and other supported types.
-    if let Ok(t) = extract_full(path) {
+    if let Ok(t) = extract_full(path, max_dim) {
         return Ok(t);
     }
 
-    // Strategy 4: raw sensor decode via rawloader (handles X3F, ORF,
-    // MRW and many other camera raw formats that lack a readable
-    // embedded JPEG preview).
-    extract_raw_thumbnail(path)
+    // Strategy 4: raw sensor decode via rawler (undemosaiced grayscale).
+    extract_raw_thumbnail(path, max_dim)
 }
 
-/// Try every IFD's `JPEGInterchangeFormat` tag. The first one whose
-/// referenced bytes start with JPEG magic wins. We never hand raw
-/// data to the `image` crate's format guesser -- that's how we ended
-/// up feeding a tiny CR2 CFA thumbnail to the TIFF decoder and
-/// getting "unknown photometric interpretation" errors.
-/// Extract a preview for the import dialog: embedded JPEG only,
-/// never a full raw-file decode. Falls through to `scan_for_largest_jpeg`
-/// (no raw processing) and, for standard image files (JPEG/PNG/TIFF),
-/// a fast full-file decode. Returns an error for raw files without
-/// an embedded JPEG preview.
-pub fn extract_dialog_preview(path: &Path) -> Result<Thumbnail, ThumbnailError> {
-    if let Ok(t) = extract_embedded(path) {
-        return Ok(t);
-    }
-    if let Ok(t) = scan_for_largest_jpeg(path) {
-        return Ok(t);
-    }
-    if (is_jpeg(path) || is_png(path) || is_tiff(path))
-        && let Ok(t) = extract_full(path)
-    {
-        return Ok(t);
-    }
-    // Last resort: raw sensor decode via rawloader.
-    extract_raw_thumbnail(path)
-}
-
-/// Try every IFD's `JPEGInterchangeFormat` tag. The first one whose
-/// referenced bytes start with JPEG magic wins. We never hand raw
-/// data to the `image` crate's format guesser -- that's how we ended
-/// up feeding a tiny CR2 CFA thumbnail to the TIFF decoder and
-/// getting "unknown photometric interpretation" errors.
-pub fn extract_embedded(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+/// Collect every EXIF-tagged JPEG (and, if needed, scanned JPEG blobs),
+/// then decode the largest by byte length.
+///
+/// When EXIF already points at a large preview (≥ [`GOOD_PREVIEW_MIN_BYTES`]),
+/// the expensive full-file scan is skipped.
+pub fn extract_largest_preview_jpeg(
+    path: &Path,
+    max_dim: u32,
+) -> Result<Thumbnail, ThumbnailError> {
     let mut file = std::fs::File::open(path)?;
-    let exif = {
-        let mut reader = std::io::BufReader::new(&file);
-        match Reader::new().read_from_container(&mut reader) {
-            Ok(e) => e,
-            Err(_) => return Err(ThumbnailError::Exif("no exif block".into())),
-        }
-    };
+    let file_len = file.metadata()?.len();
 
-    // Collect every (ifd, offset, length) triple that claims to point
-    // at an embedded JPEG, then try them in order.
+    // (offset, length) candidates; length is used as the quality proxy.
     let mut candidates: Vec<(u64, u64)> = Vec::new();
-    for f in exif.fields() {
-        if f.tag != Tag::JPEGInterchangeFormat {
-            continue;
+
+    // --- EXIF-tagged previews ---
+    if let Ok(exif) = {
+        let mut reader = std::io::BufReader::new(&file);
+        Reader::new().read_from_container(&mut reader)
+    } {
+        for f in exif.fields() {
+            if f.tag != Tag::JPEGInterchangeFormat {
+                continue;
+            }
+            let Some(offset) = f.value.get_uint(0) else {
+                continue;
+            };
+            let length = exif
+                .fields()
+                .find(|g| g.tag == Tag::JPEGInterchangeFormatLength && g.ifd_num == f.ifd_num)
+                .and_then(|g| g.value.get_uint(0))
+                .unwrap_or(0);
+            if length == 0 {
+                continue;
+            }
+            candidates.push((offset as u64, length as u64));
         }
-        let Some(offset) = f.value.get_uint(0) else {
-            continue;
-        };
-        // Find the matching length tag in the same IFD.
-        let length = exif
-            .fields()
-            .find(|g| g.tag == Tag::JPEGInterchangeFormatLength && g.ifd_num == f.ifd_num)
-            .and_then(|g| g.value.get_uint(0))
-            .unwrap_or(0);
-        if length == 0 {
-            // Length is required; the offset alone is useless.
-            continue;
+    }
+
+    let best_exif = candidates.iter().map(|(_, len)| *len).max().unwrap_or(0);
+    // Only scan the file body when EXIF has no usable large preview.
+    // Scanning up to 64 MiB per raw is the main import-dialog cost.
+    if best_exif < GOOD_PREVIEW_MIN_BYTES {
+        let to_scan = file_len.min(SCAN_LIMIT);
+        let mut scan_buf = vec![0u8; to_scan as usize];
+        file.seek(SeekFrom::Start(0))?;
+        file.read_exact(&mut scan_buf)?;
+        for (start, end) in find_jpeg_spans(&scan_buf) {
+            candidates.push((start as u64, (end - start) as u64));
         }
-        candidates.push((offset as u64, length as u64));
     }
 
     if candidates.is_empty() {
-        return Err(ThumbnailError::Exif(
-            "no JPEGInterchangeFormat tag".into(),
-        ));
+        return Err(ThumbnailError::Exif("no embedded JPEG candidates".into()));
     }
 
-    // Try each candidate, but always peek at the first 3 bytes to be
-    // sure it's actually JPEG before decoding. CR2's tiny IFD1
-    // "thumbnail" is raw CFA data -- not viewable, not JPEG -- and
-    // pointing `image` at it gives the "unknown photometric
-    // interpretation" error.
+    // Prefer larger blobs (full previews over 160×120 IFD1 thumbs).
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Try candidates largest-first; skip non-JPEG / undecodable blobs.
+    let mut last_err = ThumbnailError::Exif("no decodable embedded JPEG".into());
     for (offset, length) in candidates {
-        let mut buf = vec![0u8; length as usize];
-        file.seek(SeekFrom::Start(offset))?;
+        if offset >= file_len || length == 0 {
+            continue;
+        }
+        let read_len = length.min(file_len - offset) as usize;
+        let mut buf = vec![0u8; read_len];
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            continue;
+        }
         if file.read_exact(&mut buf).is_err() {
             continue;
         }
         if !buf.starts_with(JPEG_SOI) {
             continue;
         }
-        if let Ok(t) = decode_jpeg(&buf) {
-            return Ok(t);
+        match decode_jpeg(&buf, max_dim) {
+            Ok(t) => return Ok(t),
+            Err(e) => last_err = e,
         }
     }
 
-    Err(ThumbnailError::Exif(
-        "no embedded JPEG found via EXIF tags".into(),
-    ))
+    Err(last_err)
+}
+
+/// Try every IFD's `JPEGInterchangeFormat` tag, largest first.
+/// Prefer [`extract_largest_preview_jpeg`] which also scans the file.
+pub fn extract_embedded(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+    extract_largest_preview_jpeg(path, THUMB_MAX_DIM)
 }
 
 /// Scan the first [`SCAN_LIMIT`] bytes of the file for the largest
-/// contiguous JPEG block and decode it. Useful for cameras that don't
-/// expose the preview via `JPEGInterchangeFormat` (or for CR2 where the
-/// tagged preview is a tiny raw CFA thumbnail that the `image` crate
-/// can't read).
+/// contiguous JPEG block and decode it.
 pub fn scan_for_largest_jpeg(path: &Path) -> Result<Thumbnail, ThumbnailError> {
     let mut file = std::fs::File::open(path)?;
     let total = file.metadata()?.len();
@@ -215,14 +222,26 @@ pub fn scan_for_largest_jpeg(path: &Path) -> Result<Thumbnail, ThumbnailError> {
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut buf)?;
 
-    // Find every JPEG SOI and pair it with the next EOI. Keep the
-    // largest span.
     let mut best: Option<(usize, usize)> = None;
+    for (start, end) in find_jpeg_spans(&buf) {
+        let len = end - start;
+        if best.is_none_or(|(_, b_len)| len > b_len) {
+            best = Some((start, end));
+        }
+    }
+
+    let Some((start, end)) = best else {
+        return Err(ThumbnailError::Exif("no JPEG in scan".into()));
+    };
+    decode_jpeg(&buf[start..end], THUMB_MAX_DIM)
+}
+
+/// Find every JPEG SOI…EOI span in `buf`. Returns `(start, end)` half-open ranges.
+fn find_jpeg_spans(buf: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut i = 0;
     while i + 3 <= buf.len() {
         if &buf[i..i + 3] == JPEG_SOI {
-            // Hunt for the matching EOI. Skip over `FF xx` escaped
-            // markers and `FF 00` stuffed bytes.
             let mut j = i + 3;
             let mut found_eoi = None;
             while j + 1 < buf.len() {
@@ -233,38 +252,64 @@ pub fn scan_for_largest_jpeg(path: &Path) -> Result<Thumbnail, ThumbnailError> {
                 j += 1;
             }
             if let Some(end) = found_eoi {
-                let len = end - i;
-                if best.is_none_or(|(_, b_len)| len > b_len) {
-                    best = Some((i, end));
-                }
-                i = end; // skip past this JPEG
+                spans.push((i, end));
+                i = end;
             } else {
-                // JPEG runs past our scan window. Take the rest.
-                let len = buf.len() - i;
-                if best.is_none_or(|(_, b_len)| len > b_len) {
-                    best = Some((i, buf.len()));
-                }
+                spans.push((i, buf.len()));
                 break;
             }
         } else {
             i += 1;
         }
     }
-
-    let Some((start, end)) = best else {
-        return Err(ThumbnailError::Exif("no JPEG in scan".into()));
-    };
-    decode_jpeg(&buf[start..end])
+    spans
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Result<Thumbnail, ThumbnailError> {
+/// Extract a camera RGB preview via rawler (no demosaic). Used when
+/// JPEG scanning misses vendor-specific containers (CR3, etc.).
+fn extract_rawler_preview(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
+    use rawler::decoders::RawDecodeParams;
+    use rawler::rawsource::RawSource;
+
+    let rawfile = RawSource::new(path).map_err(|e| ThumbnailError::RawDecode(e.to_string()))?;
+    let decoder =
+        rawler::get_decoder(&rawfile).map_err(|e| ThumbnailError::RawDecode(e.to_string()))?;
+    let params = RawDecodeParams::default();
+
+    // Prefer the larger preview over the tiny thumbnail when available.
+    // Avoid full_image for dialog-sized thumbs — it can be huge.
+    let img = if max_dim <= DIALOG_THUMB_MAX_DIM {
+        decoder
+            .preview_image(&rawfile, &params)
+            .ok()
+            .flatten()
+            .or_else(|| decoder.thumbnail_image(&rawfile, &params).ok().flatten())
+    } else {
+        decoder
+            .preview_image(&rawfile, &params)
+            .ok()
+            .flatten()
+            .or_else(|| decoder.full_image(&rawfile, &params).ok().flatten())
+            .or_else(|| decoder.thumbnail_image(&rawfile, &params).ok().flatten())
+    }
+    .ok_or_else(|| ThumbnailError::RawDecode("no rawler RGB preview".into()))?;
+
+    let resized = img.thumbnail(max_dim, max_dim);
+    let rgba = resized.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(Thumbnail {
+        width: w,
+        height: h,
+        rgba: rgba.into_raw(),
+        max_dim,
+    })
+}
+
+fn decode_jpeg(bytes: &[u8], max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     // Fast path: jpeg-decoder's native `scale` is 10-50x faster
     // than the image crate's full decode for sources much larger
-    // than THUMB_MAX_DIM (which is almost always the case for raw
-    // previews -- CR2's embedded JPEG is often 1920x1280 or
-    // larger). Fall back to the image crate for anything the fast
-    // path can't handle.
-    if let Ok(t) = decode_jpeg_native(bytes) {
+    // than max_dim (common for raw previews).
+    if let Ok(t) = decode_jpeg_native(bytes, max_dim) {
         return Ok(t);
     }
     // Fallback: force JPEG format so we never call into the
@@ -272,23 +317,23 @@ fn decode_jpeg(bytes: &[u8]) -> Result<Thumbnail, ThumbnailError> {
     let mut reader = ImageReader::new(std::io::Cursor::new(bytes));
     reader.set_format(ImageFormat::Jpeg);
     let img = reader.decode()?;
-    let resized = img.resize(THUMB_MAX_DIM, THUMB_MAX_DIM, FilterType::Triangle);
+    let resized = img.resize(max_dim, max_dim, FilterType::Triangle);
     let rgba: RgbaImage = resized.to_rgba8();
     let (w, h) = rgba.dimensions();
     Ok(Thumbnail {
         width: w,
         height: h,
         rgba: rgba.into_raw(),
-        max_dim: THUMB_MAX_DIM,
+        max_dim,
     })
 }
 
 /// jpeg-decoder's scaled JPEG path for in-memory bytes. Returns
 /// `Err` if the bytes aren't a JPEG or the decoder can't handle
 /// the colour format.
-fn decode_jpeg_native(bytes: &[u8]) -> Result<Thumbnail, ThumbnailError> {
+fn decode_jpeg_native(bytes: &[u8], max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     let mut decoder = jpeg_decoder::Decoder::new(bytes);
-    let _ = decoder.scale(THUMB_MAX_DIM as u16, THUMB_MAX_DIM as u16);
+    let _ = decoder.scale(max_dim as u16, max_dim as u16);
     let pixels = decoder.decode().map_err(ThumbnailError::JpegDecode)?;
     let info = decoder.info().ok_or(ThumbnailError::Unsupported)?;
     let w = info.width as u32;
@@ -303,23 +348,16 @@ fn decode_jpeg_native(bytes: &[u8]) -> Result<Thumbnail, ThumbnailError> {
         width: w,
         height: h,
         rgba,
-        max_dim: THUMB_MAX_DIM,
+        max_dim,
     })
 }
 
 /// Decode the file to a thumbnail-sized image and resize. Used as a
 /// fallback for files without an embedded preview (most JPEGs, PNGs,
 /// etc.).
-///
-/// We use the JPEG decoder's native `scale` (which uses libjpeg's
-/// `scale_num/scale_denom` under the hood) for JPEG files: this is
-/// 10-50x faster than full-decode + resize for a 6000x4000 source.
-/// For other formats we fall back to a full decode + nearest-neighbour
-/// thumbnail, which is much faster than the Triangle filter and
-/// visually identical at thumbnail scale.
-fn extract_full(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+fn extract_full(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     if is_jpeg(path)
-        && let Ok(t) = extract_jpeg_scaled(path)
+        && let Ok(t) = extract_jpeg_scaled(path, max_dim)
     {
         return Ok(t);
     }
@@ -331,14 +369,14 @@ fn extract_full(path: &Path) -> Result<Thumbnail, ThumbnailError> {
     let mut reader = ImageReader::open(path)?.with_guessed_format()?;
     reader.no_limits();
     let img = reader.decode()?;
-    let thumb = img.thumbnail(THUMB_MAX_DIM, THUMB_MAX_DIM);
+    let thumb = img.thumbnail(max_dim, max_dim);
     let rgba = thumb.to_rgba8();
     let (w, h) = rgba.dimensions();
     Ok(Thumbnail {
         width: w,
         height: h,
         rgba: rgba.into_raw(),
-        max_dim: THUMB_MAX_DIM,
+        max_dim,
     })
 }
 
@@ -346,7 +384,7 @@ fn extract_full(path: &Path) -> Result<Thumbnail, ThumbnailError> {
 /// produce a grayscale thumbnail from the raw sensor data.
 /// This is used as a last-resort fallback when no embedded JPEG
 /// preview is found and the image crate can't decode the format.
-fn extract_raw_thumbnail(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+fn extract_raw_thumbnail(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     let img = rawler::decode_file(path).map_err(|e| ThumbnailError::RawDecode(e.to_string()))?;
 
     let (sw, sh) = (img.width, img.height);
@@ -362,7 +400,7 @@ fn extract_raw_thumbnail(path: &Path) -> Result<Thumbnail, ThumbnailError> {
     // Nearest-neighbour downscale straight from the raw sensor
     // samples.  At thumbnail scale the result is perfectly
     // recognisable even without demosaicing.
-    let scale = (THUMB_MAX_DIM as f32 / sw.max(sh) as f32).min(1.0);
+    let scale = (max_dim as f32 / sw.max(sh) as f32).min(1.0);
     let dw = (sw as f32 * scale).ceil() as u32;
     let dh = (sh as f32 * scale).ceil() as u32;
     let mut rgba = vec![0u8; (dw * dh * 4) as usize];
@@ -385,7 +423,7 @@ fn extract_raw_thumbnail(path: &Path) -> Result<Thumbnail, ThumbnailError> {
         width: dw,
         height: dh,
         rgba,
-        max_dim: THUMB_MAX_DIM,
+        max_dim,
     })
 }
 
@@ -404,39 +442,17 @@ fn is_jpeg(path: &Path) -> bool {
     )
 }
 
-fn is_png(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref(),
-        Some("png")
-    )
-}
-
-fn is_tiff(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref(),
-        Some("tif" | "tiff")
-    )
-}
-
 /// Decode a JPEG to a thumbnail-sized image using libjpeg's native
 /// `scale` (1/8, 1/4, 1/2, 1). The resulting image is at most the
 /// requested size; we accept that and let the renderer's
 /// size-to-fit logic letterbox it into the 3:2 card frame.
-fn extract_jpeg_scaled(path: &Path) -> Result<Thumbnail, ThumbnailError> {
+fn extract_jpeg_scaled(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     let file = std::fs::File::open(path)?;
     let mut decoder = jpeg_decoder::Decoder::new(std::io::BufReader::new(file));
-    // Ask for at most THUMB_MAX_DIM on the long edge; the decoder
-    // will pick the smallest supported scale factor (1/8, 1/4, 1/2
-    // or 1) that produces an image >= that size in at least one
-    // axis. This avoids decoding 96 MB of pixels for a 6000x4000
-    // source.
-    let _ = decoder.scale(THUMB_MAX_DIM as u16, THUMB_MAX_DIM as u16);
+    // Ask for at most max_dim on the long edge; the decoder will pick
+    // the smallest supported scale factor (1/8, 1/4, 1/2 or 1) that
+    // produces an image >= that size in at least one axis.
+    let _ = decoder.scale(max_dim as u16, max_dim as u16);
     let pixels = decoder.decode().map_err(ThumbnailError::JpegDecode)?;
     let info = decoder.info().ok_or(ThumbnailError::Unsupported)?;
     let w = info.width as u32;
@@ -451,7 +467,7 @@ fn extract_jpeg_scaled(path: &Path) -> Result<Thumbnail, ThumbnailError> {
         width: w,
         height: h,
         rgba,
-        max_dim: THUMB_MAX_DIM,
+        max_dim,
     })
 }
 
@@ -699,6 +715,37 @@ mod tests {
         // rescue us if the EXIF path fails.
         let t = extract_thumbnail(&p).expect("thumbnail");
         assert!(t.width > 0 && t.height > 0);
+    }
+
+    #[test]
+    fn prefers_larger_scanned_jpeg_over_tiny_exif_thumb() {
+        // Simulate a real raw: tiny EXIF-tagged thumb + much larger
+        // untagged preview later in the file. Library thumbs must use
+        // the large one.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("fake_raw.bin");
+
+        let tiny = build_jpeg(16, 12);
+        let large = build_jpeg(320, 240);
+
+        // Write TIFF with EXIF pointing at the tiny JPEG.
+        write_fake_tiff_with_jpeg(&p, &tiny);
+
+        // Append padding + the large preview JPEG (untagged).
+        let mut body = std::fs::read(&p).unwrap();
+        body.extend_from_slice(&[0xAAu8; 256]);
+        body.extend_from_slice(&large);
+        std::fs::write(&p, &body).unwrap();
+
+        let t = extract_largest_preview_jpeg(&p, THUMB_MAX_DIM).expect("largest preview");
+        // Long edge of large source is 320; after THUMB_MAX_DIM scale
+        // we still expect something clearly bigger than the 16×12 thumb.
+        assert!(
+            t.width.max(t.height) >= 64,
+            "expected large preview, got {}x{}",
+            t.width,
+            t.height
+        );
     }
 
     #[test]
