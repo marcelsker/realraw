@@ -81,11 +81,11 @@ find_win_cmd() {
         "$home/scoop/shims/${name}.exe" \
         "$home/scoop/apps/nsis/current/${name}.exe" \
         "$home/scoop/apps/wixtoolset/current/bin/${name}.exe" \
+        "$home/.dotnet/tools/${name}.exe" \
         "/c/Program Files (x86)/NSIS/${name}.exe" \
         "/c/Program Files/NSIS/${name}.exe" \
-        "/c/Program Files (x86)/WiX Toolset v3.14/bin/${name}.exe" \
-        "/c/Program Files (x86)/WiX Toolset v3.11/bin/${name}.exe" \
-        "/c/Program Files/WiX Toolset v3.14/bin/${name}.exe" \
+        "/c/Program Files/WiX/${name}.exe" \
+        "/c/Program Files (x86)/WiX/${name}.exe" \
         ; do
         if [ -x "$p" ] || [ -f "$p" ]; then
             echo "$p"
@@ -222,38 +222,21 @@ cmd_nsis() {
 }
 
 cmd_wix() {
-    local candle light
-    if ! candle="$(find_win_cmd candle)"; then
-        echo "error: 'candle' (WiX Toolset v3) is required but not installed."
+    local wix
+    if ! wix="$(find_win_cmd wix)"; then
+        echo "error: 'wix' (WiX Toolset v4+) is required but not installed."
         echo "install with:"
-        echo "  scoop bucket add extras"
-        echo "  scoop install wixtoolset nsis"
-        exit 1
-    fi
-    if ! light="$(find_win_cmd light)"; then
-        echo "error: 'light' (WiX Toolset v3) is required but not installed."
-        echo "install with:"
-        echo "  scoop bucket add extras"
-        echo "  scoop install wixtoolset nsis"
+        echo "  dotnet tool install --global wix"
+        echo "  or download from https://github.com/wixtoolset/wix/releases"
         exit 1
     fi
 
     ensure_release_bin
 
-    local wixobj="target/release/${BIN_NAME}.wixobj"
     local msi="target/release/${BIN_NAME}-${VERSION}-x64.msi"
 
     echo "==> Building WiX MSI (v${VERSION})..."
-    "$candle" \
-        -nologo \
-        -arch x64 \
-        -dProductVersion="${VERSION}" \
-        -out "$wixobj" \
-        packaging/windows/realraw.wxs
-    "$light" \
-        -nologo \
-        -out "$msi" \
-        "$wixobj"
+    "$wix" build -nologo -arch x64 -d ProductVersion="${VERSION}" -out "$msi" packaging/windows/realraw.wxs
     echo "==> Done: $msi"
 }
 
@@ -276,10 +259,10 @@ cmd_all() {
             else
                 echo "==> Skipping NSIS (makensis not found)"
             fi
-            if find_win_cmd candle &>/dev/null && find_win_cmd light &>/dev/null; then
+            if find_win_cmd wix &>/dev/null; then
                 cmd_wix
             else
-                echo "==> Skipping WiX (candle/light not found)"
+                echo "==> Skipping WiX (wix not found)"
             fi
             ;;
         *)

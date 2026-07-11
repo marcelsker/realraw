@@ -49,9 +49,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tools
-          key: win-packaging-nsis-3.10-wix-3.14.1
+          key: win-packaging-nsis-3.10-wix-4.0.5
 
-      - name: Install NSIS and WiX (portable)
+      - name: Install NSIS (portable)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -67,18 +67,26 @@ jobs:
             Remove-Item $nsisZip -Force -ErrorAction SilentlyContinue
           }
 
-          $wixDir = Join-Path $tools "wix"
-          if (-not (Test-Path (Join-Path $wixDir "candle.exe"))) {
-            $wixZip = Join-Path $tools "wix314-binaries.zip"
-            Write-Host "Downloading WiX 3.14 binaries..."
-            Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile $wixZip
-            New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
-            Expand-Archive -Path $wixZip -DestinationPath $wixDir -Force
-            Remove-Item $wixZip -Force -ErrorAction SilentlyContinue
-          }
-
           Add-Content -Path $env:GITHUB_PATH -Value $nsisDir
-          Add-Content -Path $env:GITHUB_PATH -Value $wixDir
+
+      - name: Setup .NET
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.x
+
+      - name: Install WiX (dotnet global tool)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wixExe = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
+          if (-not (Test-Path $wixExe)) {
+            Write-Host "Installing WiX 4.0.5 CLI..."
+            dotnet tool install --global wix --version 4.0.5
+          } else {
+            Write-Host "Using cached WiX CLI"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:USERPROFILE ".dotnet\tools")
 
       # Single release compile: builds lib, bins, and tests.
       - name: Test (release)
