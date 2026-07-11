@@ -1,18 +1,24 @@
 //! Linear RAW develop + tone stage.
 //!
 //! Pipeline:
-//! 1. rawler demosaic + WB + cam→linear sRGB (no gamma)
-//! 2. Cache f32 RGB (`LinearPreview`)
-//! 3. Tone: exposure → contrast → H/S/W/B → sRGB OETF → Rgba8
+//! 1. LibRaw demosaic + camera WB + matrix + highlight recovery
+//! 2. Linear sRGB f32 (`LinearPreview`, no gamma)
+//! 3. Cache f32 RGB
+//! 4. Tone: exposure → contrast → H/S/W/B → sRGB OETF → Rgba8
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
-use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
+use libraw_sys as libraw;
 use rawler::imgop::srgb::srgb_apply_gamma;
 
-use super::decode::{DecodeError, PreviewImage, PreviewSource};
+use super::decode::{DecodeError, PreviewImage, PreviewSource, PREVIEW_MAX_DIM};
 use super::settings::ToneParams;
+
+/// LibRaw `params.highlight`: 0=clip, 1=unclip, 2=blend, 3..=9=rebuild.
+const LIBRAW_HIGHLIGHT_REBUILD: i32 = 3;
+/// LibRaw linear + `no_auto_bright` lands ~1 EV dark vs camera / prior rawler path.
+const LIBRAW_EV_COMP: f32 = 1.0;
 
 /// Linear (pre-gamma) develop buffer for interactive tone ops.
 #[derive(Debug, Clone)]
@@ -58,7 +64,7 @@ pub fn develop_linear_with_progress(
     })) {
         Ok(result) => result,
         Err(_) => Err(DecodeError::Raw(
-            "rawler linear develop panicked (unsupported or corrupt file)".into(),
+            "libraw linear develop panicked (unsupported or corrupt file)".into(),
         )),
     }
 }
@@ -70,45 +76,18 @@ fn develop_linear_inner(
     on_progress: &mut dyn FnMut(f32),
 ) -> Result<LinearPreview, DecodeError> {
     on_progress(0.05);
-    let raw = rawler::decode_file(path).map_err(|e| DecodeError::Raw(e.to_string()))?;
-    on_progress(0.15);
+    let buf = std::fs::read(path)?;
+    on_progress(0.10);
 
-    let ori = orientation.or_else(|| {
-        let u = raw.orientation.to_u16();
-        if u == 0 {
-            None
-        } else {
-            Some(u as i64)
-        }
-    });
+    let (mut width, mut height, mut rgb) = libraw_develop_linear(&buf, max_dim, on_progress)?;
+    on_progress(0.72);
 
-    let dev = RawDevelop {
-        steps: vec![
-            ProcessingStep::Rescale,
-            ProcessingStep::Demosaic,
-            ProcessingStep::CropActiveArea,
-            ProcessingStep::WhiteBalance,
-            ProcessingStep::Calibrate,
-            ProcessingStep::CropDefault,
-            // No ProcessingStep::SRgb — keep linear for exposure.
-        ],
-    };
-
-    // Bulk of the work (rawler demosaic + WB + calibrate).
-    // Cap at ~0.80 so the worker can still report cache/tone work after.
-    on_progress(0.2);
-    let intermediate = dev
-        .develop_intermediate(&raw)
-        .map_err(|e| DecodeError::Raw(e.to_string()))?;
-    on_progress(0.65);
-
-    let (mut width, mut height, mut rgb) = intermediate_to_rgb_f32(intermediate)?;
-    on_progress(0.68);
-    let (w2, h2, rgb2) = apply_orientation_rgb(rgb, width, height, ori.unwrap_or(1));
+    let ori = orientation.unwrap_or(1);
+    let (w2, h2, rgb2) = apply_orientation_rgb(rgb, width, height, ori);
     width = w2;
     height = h2;
     rgb = rgb2;
-    on_progress(0.72);
+    on_progress(0.75);
 
     if width <= max_dim && height <= max_dim {
         on_progress(0.95);
@@ -119,9 +98,8 @@ fn develop_linear_inner(
         });
     }
 
-    // Box-filter downsample is CPU-heavy on full-res demosaic; report rows.
     let (w3, h3, rgb3) =
-        downscale_rgb_with_progress(&rgb, width, height, max_dim, on_progress, 0.72, 0.95);
+        downscale_rgb_with_progress(&rgb, width, height, max_dim, on_progress, 0.75, 0.95);
     on_progress(0.95);
     Ok(LinearPreview {
         width: w3,
@@ -130,44 +108,131 @@ fn develop_linear_inner(
     })
 }
 
-fn intermediate_to_rgb_f32(
-    intermediate: Intermediate,
+/// LibRaw develop → linear sRGB f32 RGB (interleaved).
+fn libraw_develop_linear(
+    buf: &[u8],
+    max_dim: u32,
+    on_progress: &mut dyn FnMut(f32),
 ) -> Result<(u32, u32, Vec<f32>), DecodeError> {
-    match intermediate {
-        Intermediate::ThreeColor(pixels) => {
-            let w = pixels.width as u32;
-            let h = pixels.height as u32;
-            let mut rgb = Vec::with_capacity(pixels.data.len() * 3);
-            for p in &pixels.data {
-                rgb.push(p[0]);
-                rgb.push(p[1]);
-                rgb.push(p[2]);
-            }
-            Ok((w, h, rgb))
+    unsafe {
+        let lr = libraw::libraw_init(0);
+        if lr.is_null() {
+            return Err(DecodeError::Raw("libraw_init failed".into()));
         }
-        Intermediate::FourColor(pixels) => {
-            let w = pixels.width as u32;
-            let h = pixels.height as u32;
-            let mut rgb = Vec::with_capacity(pixels.data.len() * 3);
-            for p in &pixels.data {
-                rgb.push(p[0]);
-                rgb.push(p[1]);
-                rgb.push(p[2]);
+        // Ensure cleanup on all paths.
+        struct LibRawGuard(*mut libraw::libraw_data_t);
+        impl Drop for LibRawGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { libraw::libraw_close(self.0) };
+                }
             }
-            Ok((w, h, rgb))
         }
-        Intermediate::Monochrome(pixels) => {
-            let w = pixels.dim().w as u32;
-            let h = pixels.dim().h as u32;
-            let mut rgb = Vec::with_capacity(pixels.data.len() * 3);
-            for &v in &pixels.data {
-                rgb.push(v);
-                rgb.push(v);
-                rgb.push(v);
+        let _guard = LibRawGuard(lr);
+
+        libraw_check(libraw::libraw_open_buffer(
+            lr,
+            buf.as_ptr() as *const _,
+            buf.len() as _,
+        ))?;
+
+        // Params before unpack (half_size) / process (the rest).
+        {
+            let p = &mut (*lr).params;
+            if max_dim <= PREVIEW_MAX_DIM {
+                p.half_size = 1;
             }
-            Ok((w, h, rgb))
+            p.use_camera_wb = 1;
+            p.use_camera_matrix = 1;
+            p.highlight = LIBRAW_HIGHLIGHT_REBUILD;
+            p.no_auto_bright = 1;
+            // Fixed +1 EV: matches camera midtones without LibRaw auto-bright.
+            p.bright = 2f32.powf(LIBRAW_EV_COMP);
+            p.output_color = 1; // sRGB
+            p.output_bps = 16;
+            // Linear transfer so our tone stage owns the OETF.
+            p.gamm[0] = 1.0;
+            p.gamm[1] = 1.0;
+            // Catalog / EXIF orientation applied after.
+            p.user_flip = 0;
         }
+
+        on_progress(0.15);
+        libraw_check(libraw::libraw_unpack(lr))?;
+        on_progress(0.40);
+        libraw_check(libraw::libraw_dcraw_process(lr))?;
+        on_progress(0.65);
+
+        let mut err = 0i32;
+        let mem = libraw::libraw_dcraw_make_mem_image(lr, &mut err);
+        libraw_check(err)?;
+        if mem.is_null() {
+            return Err(DecodeError::Raw("libraw_dcraw_make_mem_image null".into()));
+        }
+        struct MemGuard(*mut libraw::libraw_processed_image_t);
+        impl Drop for MemGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { libraw::libraw_dcraw_clear_mem(self.0) };
+                }
+            }
+        }
+        let mem = MemGuard(mem);
+
+        let width = (*mem.0).width as u32;
+        let height = (*mem.0).height as u32;
+        let colors = (*mem.0).colors as usize;
+        let bits = (*mem.0).bits as usize;
+        if colors < 3 {
+            return Err(DecodeError::Raw(format!(
+                "libraw: expected ≥3 channels, got {colors}"
+            )));
+        }
+        if bits != 16 {
+            return Err(DecodeError::Raw(format!(
+                "libraw: expected 16-bit, got {bits}"
+            )));
+        }
+
+        let n = width as usize * height as usize;
+        let data_size = (*mem.0).data_size as usize;
+        let sample_count = data_size / 2;
+        if sample_count < n * colors {
+            return Err(DecodeError::Raw(format!(
+                "libraw: buffer short ({sample_count} samples for {width}x{height}x{colors})"
+            )));
+        }
+        let samples = std::slice::from_raw_parts((*mem.0).data.as_ptr() as *const u16, sample_count);
+
+        let mut rgb = Vec::with_capacity(n * 3);
+        let scale = 1.0 / 65535.0;
+        for i in 0..n {
+            let o = i * colors;
+            rgb.push(samples[o] as f32 * scale);
+            rgb.push(samples[o + 1] as f32 * scale);
+            rgb.push(samples[o + 2] as f32 * scale);
+        }
+
+        // Guards drop here (mem image then libraw handle).
+        Ok((width, height, rgb))
     }
+}
+
+fn libraw_check(code: i32) -> Result<(), DecodeError> {
+    if code == 0 {
+        return Ok(());
+    }
+    let msg = unsafe {
+        let p = libraw::libraw_strerror(code);
+        if p.is_null() {
+            format!("libraw error {code}")
+        } else {
+            std::ffi::CStr::from_ptr(p)
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    Err(DecodeError::Raw(msg))
 }
 
 /// Apply exposure only. Prefer [`apply_tone`] when other light sliders are set.
@@ -710,5 +775,4 @@ mod tests {
         assert!(d1.rgba[0] > d0.rgba[0], "blacks+ should lift darks");
         assert!(b1.rgba[0] < b0.rgba[0], "whites- should drop brights");
     }
-
 }

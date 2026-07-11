@@ -1,7 +1,7 @@
 //! Progressive RAW preview decode for Develop mode.
 //!
 //! Phase 1: largest embedded JPEG (fast first paint).
-//! Phase 2: rawler demosaic + WB + color matrix + sRGB (authoritative).
+//! Phase 2: LibRaw linear demosaic (via `develop_linear`) + tone (authoritative).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};

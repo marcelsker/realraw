@@ -1,0 +1,26 @@
+[package]
+edition = "2018"
+name = "libraw-rs-sys"
+version = "0.0.4+libraw-0.20.1"
+authors = ["Paolo Barbolini <paolo@paolo565.org>"]
+build = "build.rs"
+description = "FFI bindings to LibRaw (MSVC-friendly vendored build for realraw)"
+readme = "README.md"
+keywords = ["raw"]
+categories = ["multimedia::images", "external-ffi-bindings"]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/paolobarbolini/libraw-rs"
+publish = false
+
+[lib]
+name = "libraw_sys"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+
+[features]
+default = []
+bindgen = []

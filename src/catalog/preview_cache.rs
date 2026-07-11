@@ -21,7 +21,8 @@ const FILES_PER_SHARD: i64 = 32;
 
 /// Magic + version for `.rrln` linear cache files.
 const RRLN_MAGIC: &[u8; 4] = b"RRLN";
-const RRLN_VERSION: u32 = 1;
+/// Bump when linear buffer semantics change (e.g. highlight reconstruction).
+const RRLN_VERSION: u32 = 9;
 
 /// Root directory of the demosaic preview cache.
 pub fn cache_dir(catalog_dir: &Path) -> PathBuf {

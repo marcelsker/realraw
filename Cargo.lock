@@ -2548,6 +2548,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "libraw-rs-sys"
+version = "0.0.4+libraw-0.20.1"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3779,6 +3787,7 @@ dependencies = [
  "image",
  "jpeg-decoder",
  "kamadak-exif",
+ "libraw-rs-sys",
  "quick-xml 0.41.0",
  "r2d2",
  "r2d2_sqlite",

@@ -40,6 +40,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 jpeg-decoder = "0.3"
 hex = "0.4"
 rawler = "0.7"
+libraw-rs-sys = { path = "crates/libraw-sys" }
 egui-phosphor = "0.9"
 cacache-sync = "11"
 quick-xml = "0.41"
