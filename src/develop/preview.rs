@@ -80,7 +80,7 @@ pub struct DevelopPreview {
     /// linear-cache hits, idle, or after settle.
     demosaic_progress: Option<f32>,
     /// Linear demosaic buffer for the current photo (pre-tone).
-    linear: Option<Arc<LinearPreview>>,
+    pub linear: Option<Arc<LinearPreview>>,
     /// Current light-panel tone params.
     tone: ToneParams,
     /// True while a tone slider is being dragged.
@@ -312,6 +312,45 @@ impl DevelopPreview {
             return;
         }
         self.schedule_tone();
+    }
+
+    /// Sample linear RGB from the demosaiced buffer at normalized UV coords.
+    ///
+    /// Averages a 5×5 neighbourhood for noise reduction. Returns `None` if the
+    /// linear buffer is not yet available or the coordinates are out of range.
+    pub fn sample_pixel(&self, u: f32, v: f32) -> Option<(f32, f32, f32)> {
+        let linear = self.linear.as_ref()?;
+        let w = linear.width as f32;
+        let h = linear.height as f32;
+        let cx = (u * w).round().clamp(0.0, w - 1.0) as i32;
+        let cy = (v * h).round().clamp(0.0, h - 1.0) as i32;
+        let radius = 2;
+        let mut sum_r = 0.0f64;
+        let mut sum_g = 0.0f64;
+        let mut sum_b = 0.0f64;
+        let mut count = 0u64;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px < 0 || px >= linear.width as i32 || py < 0 || py >= linear.height as i32 {
+                    continue;
+                }
+                let base = (py as usize * linear.width as usize + px as usize) * 3;
+                sum_r += linear.rgb[base] as f64;
+                sum_g += linear.rgb[base + 1] as f64;
+                sum_b += linear.rgb[base + 2] as f64;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some((
+            (sum_r / count as f64) as f32,
+            (sum_g / count as f64) as f32,
+            (sum_b / count as f64) as f32,
+        ))
     }
 
     /// Report the develop central-panel viewport so tone renders match

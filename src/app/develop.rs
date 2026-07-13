@@ -2,8 +2,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui_phosphor::variants::regular;
 
 use crate::app::App;
+use crate::develop::pipeline::{auto_wb, eyedropper_wb};
+use crate::develop::settings::WhiteBalancePreset;
 use crate::develop::DevelopSettings;
 use crate::import::xmp::update_sidecar_develop;
 
@@ -107,6 +110,35 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
     ui.separator();
 }
 
+/// Determine the displayed preset name, accounting for auto-WB tracking.
+fn current_preset_display(app: &App) -> WhiteBalancePreset {
+    if app.develop.temp == 0.0 && app.develop.tint == 0.0 {
+        return WhiteBalancePreset::AsShot;
+    }
+    if (app.develop.temp - app.last_auto_temp).abs() < 1.0
+        && (app.develop.tint - app.last_auto_tint).abs() < 1.0
+    {
+        return WhiteBalancePreset::Auto;
+    }
+    app.develop.wb_preset()
+}
+
+/// Apply a white-balance preset and mark state as dirty.
+fn apply_preset(app: &mut App, preset: WhiteBalancePreset, any: &mut bool) {
+    app.develop.apply_wb_preset(preset);
+    if preset == WhiteBalancePreset::Auto {
+        if let Some(linear) = &app.develop_preview.linear {
+            let (t, ti) = auto_wb(linear);
+            app.develop.temp = t;
+            app.develop.tint = ti;
+            app.last_auto_temp = t;
+            app.last_auto_tint = ti;
+        }
+    }
+    *any = true;
+    app.develop_preview.set_tone(app.develop.tone(), false);
+}
+
 /// `Loading.` → `Loading..` → `Loading...` loop (~2.5 cycles/sec).
 fn loading_dots(ctx: &egui::Context) -> String {
     let t = ctx.input(|i| i.time);
@@ -160,6 +192,8 @@ fn load_develop_for(app: &mut App, id: i64) {
     app.develop_loaded_id = Some(id);
     app.develop_dirty = false;
     app.develop_dragging = false;
+    app.last_auto_temp = 0.0;
+    app.last_auto_tint = 0.0;
 }
 
 /// Ensure the develop preview is loading the currently selected photo.
@@ -224,6 +258,67 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 let mut any = false;
                 let mut dragging = false;
 
+                section_header(ui, "White Balance");
+
+                // ── Preset dropdown + Eyedropper ──
+                let display = current_preset_display(app);
+                ui.horizontal(|ui| {
+                    ui.add_sized([80.0, 0.0], egui::Label::new("Preset"));
+                    egui::ComboBox::from_id_salt("wb_preset")
+                        .selected_text(display.name())
+                        .show_ui(ui, |ui| {
+                            for preset in WhiteBalancePreset::ALL {
+                                if ui
+                                    .selectable_label(display == *preset, preset.name())
+                                    .clicked()
+                                {
+                                    if *preset != display {
+                                        apply_preset(app, *preset, &mut any);
+                                    }
+                                }
+                            }
+                        });
+                    let eye_btn = egui::Button::new(regular::EYEDROPPER)
+                        .selected(app.eyedropper_active)
+                        .min_size(egui::vec2(28.0, 0.0));
+                    if ui.add(eye_btn).clicked() {
+                        app.eyedropper_active = !app.eyedropper_active;
+                    }
+                });
+
+                // ── Kelvin slider ──
+                {
+                    let mut kelvin = app.develop.kelvin();
+                    ui.horizontal(|ui| {
+                        ui.add_sized([80.0, 0.0], egui::Label::new("Kelvin"));
+                        let r = ui.add(
+                            egui::Slider::new(&mut kelvin, 2000.0..=25000.0).show_value(true),
+                        );
+                        if r.changed() || r.drag_stopped() {
+                            kelvin = kelvin.clamp(2000.0, 25000.0);
+                            app.develop.set_kelvin(kelvin);
+                            any = true;
+                            app.develop_preview
+                                .set_tone(app.develop.tone(), r.drag_stopped());
+                        }
+                        if r.dragged() && !r.drag_stopped() {
+                            dragging = true;
+                        }
+                    });
+                }
+
+                // ── Tint slider ──
+                {
+                    let hit = slider_row(ui, "Tint", &mut app.develop.tint, -100.0..=100.0);
+                    if hit.changed {
+                        any = true;
+                        app.develop_preview
+                            .set_tone(app.develop.tone(), hit.dragging);
+                    }
+                    dragging |= hit.dragging;
+                }
+
+                ui.add_space(12.0);
                 section_header(ui, "Light");
                 {
                     let hit = slider_row(ui, "Exposure", &mut app.develop.exposure, -5.0..=5.0);
@@ -299,27 +394,6 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     dragging |= h.dragging;
                 }
 
-                ui.add_space(12.0);
-                section_header(ui, "Color");
-                {
-                    let hit = slider_row(ui, "Temp", &mut app.develop.temp, -100.0..=100.0);
-                    if hit.changed {
-                        any = true;
-                        app.develop_preview
-                            .set_tone(app.develop.tone(), hit.dragging);
-                    }
-                    dragging |= hit.dragging;
-                }
-                {
-                    let hit = slider_row(ui, "Tint", &mut app.develop.tint, -100.0..=100.0);
-                    if hit.changed {
-                        any = true;
-                        app.develop_preview
-                            .set_tone(app.develop.tone(), hit.dragging);
-                    }
-                    dragging |= hit.dragging;
-                }
-
                 if any {
                     app.develop_dirty = true;
                     schedule_thumb_refresh(app);
@@ -340,6 +414,10 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
 
     if app.develop_dirty && !app.develop_dragging {
         flush_develop(app);
+    }
+
+    if app.eyedropper_active {
+        ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
     }
 
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -387,7 +465,12 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 egui::vec2(w.max(1.0), h.max(1.0))
             };
             ui.centered_and_justified(|ui| {
-                let (rect, _) = ui.allocate_exact_size(display, egui::Sense::hover());
+                let sense = if app.eyedropper_active {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                };
+                let (rect, response) = ui.allocate_exact_size(display, sense);
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 // Base stays the thumbnail for the whole crossfade (no pop).
                 ui.painter().image(base_id, rect, uv, egui::Color32::WHITE);
@@ -398,6 +481,22 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                         let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, a_u8);
                         ui.painter().image(rev_id, rect, uv, tint);
                     }
+                }
+                // Eyedropper click: sample pixel and compute WB.
+                if app.eyedropper_active && response.clicked() {
+                    if let Some(pos) = response.hover_pos() {
+                        let u = ((pos.x - rect.min.x) / rect.size().x).clamp(0.0, 1.0);
+                        let v = ((pos.y - rect.min.y) / rect.size().y).clamp(0.0, 1.0);
+                        if let Some((r, g, b)) = app.develop_preview.sample_pixel(u, v) {
+                            let (temp, tint) = eyedropper_wb(r, g, b);
+                            app.develop.temp = temp;
+                            app.develop.tint = tint;
+                            app.develop_preview.set_tone(app.develop.tone(), false);
+                            app.develop_dirty = true;
+                            schedule_thumb_refresh(app);
+                        }
+                    }
+                    app.eyedropper_active = false;
                 }
             });
             if let Some(p) = demosaic_progress {

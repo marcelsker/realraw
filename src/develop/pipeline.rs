@@ -32,7 +32,7 @@ const WB_TINT_STOPS: f32 = 0.2;
 /// case (temp = tint = 0) returns `[1.0; 3]` — no change relative to the
 /// camera white balance already baked in by LibRaw.
 #[inline]
-fn wb_gains(temp: f32, tint: f32) -> [f32; 3] {
+pub fn wb_gains(temp: f32, tint: f32) -> [f32; 3] {
     let t = (temp / 100.0).clamp(-1.0, 1.0);
     let g = (tint / 100.0).clamp(-1.0, 1.0);
     [
@@ -40,6 +40,79 @@ fn wb_gains(temp: f32, tint: f32) -> [f32; 3] {
         2.0_f32.powf(g * WB_TINT_STOPS),
         2.0_f32.powf(-t * WB_TEMP_STOPS),
     ]
+}
+
+/// Inverse of [`wb_gains`]: convert desired per-channel gains to temp/tint.
+///
+/// Gains are relative to the identity point `[1.0; 3]`. Returns `(temp, tint)`
+/// in the `-100..=100` range.
+fn gains_to_temp_tint(r_gain: f32, g_gain: f32, b_gain: f32) -> (f32, f32) {
+    let t_r = r_gain.max(1e-10).log2() / WB_TEMP_STOPS;
+    let t_b = -b_gain.max(1e-10).log2() / WB_TEMP_STOPS;
+    let t = (t_r + t_b) / 2.0;
+    let g = g_gain.max(1e-10).log2() / WB_TINT_STOPS;
+    (t.clamp(-1.0, 1.0) * 100.0, g.clamp(-1.0, 1.0) * 100.0)
+}
+
+/// Compute auto white balance from a full linear preview (gray-world).
+///
+/// Returns `(temp, tint)` offsets in the `-100..=100` range that neutralise
+/// the average scene colour. Very dark and overexposed pixels are excluded.
+pub fn auto_wb(linear: &LinearPreview) -> (f32, f32) {
+    let n = linear.pixel_count();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+
+    let mut sum_r = 0.0f64;
+    let mut sum_g = 0.0f64;
+    let mut sum_b = 0.0f64;
+    let mut count = 0u64;
+
+    for i in 0..n {
+        let base = i * 3;
+        let r = linear.rgb[base] as f64;
+        let g = linear.rgb[base + 1] as f64;
+        let b = linear.rgb[base + 2] as f64;
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if lum > 0.005 && lum < 0.98 {
+            sum_r += r;
+            sum_g += g;
+            sum_b += b;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return (0.0, 0.0);
+    }
+
+    let avg_r = sum_r / count as f64;
+    let avg_g = sum_g / count as f64;
+    let avg_b = sum_b / count as f64;
+    let target = (avg_r + avg_g + avg_b) / 3.0;
+
+    gains_to_temp_tint(
+        (target / avg_r) as f32,
+        (target / avg_g) as f32,
+        (target / avg_b) as f32,
+    )
+}
+
+/// Compute white balance from a sampled linear RGB value (eyedropper).
+///
+/// Returns `(temp, tint)` offsets that would make the sample neutral (R=G=B).
+pub fn eyedropper_wb(r: f32, g: f32, b: f32) -> (f32, f32) {
+    let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if lum < 1e-10 {
+        return (0.0, 0.0);
+    }
+    let target = (r + g + b) / 3.0;
+    gains_to_temp_tint(
+        target / r.max(1e-10),
+        target / g.max(1e-10),
+        target / b.max(1e-10),
+    )
 }
 
 /// LibRaw `params.highlight`: 0=clip, 1=unclip, 2=blend, 3..=9=rebuild.

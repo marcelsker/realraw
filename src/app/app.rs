@@ -79,6 +79,13 @@ pub struct App {
     /// [`crate::app::develop::THUMB_REFRESH_DEBOUNCE`].
     pub develop_thumb_due: Option<(i64, Instant)>,
 
+    /// True while the eyedropper tool is active for white balance picking.
+    pub eyedropper_active: bool,
+
+    /// Last auto-white-balance computed temp/tint for preset detection.
+    pub last_auto_temp: f32,
+    pub last_auto_tint: f32,
+
     /// Progressive RAW preview for Develop mode.
     pub develop_preview: DevelopPreview,
 
@@ -175,6 +182,9 @@ impl Default for App {
             develop_dirty: false,
             develop_dragging: false,
             develop_thumb_due: None,
+            eyedropper_active: false,
+            last_auto_temp: 0.0,
+            last_auto_tint: 0.0,
             develop_preview: DevelopPreview::default(),
             library: LibraryPage::default(),
             library_last_refresh_mtime_ms: None,
