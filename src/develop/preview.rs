@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,12 +18,70 @@ use eframe::egui;
 use super::decode::{
     decode_embedded_preview, decode_raw_preview, PreviewImage, PreviewSource, PREVIEW_MAX_DIM,
 };
-use super::pipeline::{apply_tone, develop_linear_with_progress, LinearPreview};
+use super::pipeline::{
+    apply_balance, apply_curves, apply_output, apply_tone, develop_linear_with_progress,
+    downscale_rgb_nearest, proxy_dims, LinearPreview,
+};
 use super::settings::ToneParams;
 use crate::catalog::{preview_cache, thumbnail_cache};
+use crate::gpu::{GpuBackend, GpuContext};
 
 /// Crossfade duration from thumbnail → demosaic (seconds).
 const FADE_SECS: f32 = 0.0;
+
+/// Divisor applied to the on-screen render size while a slider is being
+/// dragged. The egui texture is uploaded at this lower resolution and
+/// bilinear-upscaled to the display rect, which is roughly 4× faster on
+/// CPU and noticeably snappier on GPU. On drag-stop the full-resolution
+/// pass runs and snaps in within one frame.
+const DRAG_QUALITY_DIVISOR: u32 = 2;
+/// Hard floor for the dragged render dim; tiny panels stay readable.
+const DRAG_QUALITY_MIN_DIM: u32 = 128;
+
+/// TTL for intermediate stage caches (balance, curves).
+/// During active slider dragging (~100ms between events) the cache stays hot.
+/// After the user stops, it expires quickly so stale entries don't persist.
+const CACHE_TTL: Duration = Duration::from_millis(200);
+
+/// Hash the params that feed into Stage 1 (balance: exposure × WB gains).
+fn hash_balance(exposure: f32, temp: f32, tint: f32) -> u64 {
+    (exposure.to_bits() as u64)
+        ^ (temp.to_bits() as u64).rotate_left(13)
+        ^ (tint.to_bits() as u64).rotate_left(26)
+}
+
+/// Hash the params that feed into Stage 2 (curves: luminance curves).
+fn hash_curves(
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+) -> u64 {
+    (contrast.to_bits() as u64)
+        ^ (highlights.to_bits() as u64).rotate_left(8)
+        ^ (shadows.to_bits() as u64).rotate_left(16)
+        ^ (whites.to_bits() as u64).rotate_left(24)
+        ^ (blacks.to_bits() as u64).rotate_left(32)
+}
+
+/// Cache entry for an intermediate pipeline stage buffer.
+struct StageCache {
+    rgb: Vec<f32>,
+    width: u32,
+    height: u32,
+    params_hash: u64,
+    cached_at: Instant,
+}
+
+impl StageCache {
+    fn valid(&self, params_hash: u64, width: u32, height: u32) -> bool {
+        self.params_hash == params_hash
+            && self.width == width
+            && self.height == height
+            && self.cached_at.elapsed() < CACHE_TTL
+    }
+}
 
 struct PreviewResult {
     photo_id: i64,
@@ -52,6 +110,12 @@ enum ResultKind {
     Tone {
         tone_gen: u64,
         img: PreviewImage,
+        /// Freshly-computed Stage 1 data (None if cache was reused).
+        balanced_rgb: Option<Vec<f32>>,
+        balanced_w: u32,
+        balanced_h: u32,
+        /// Freshly-computed Stage 2 data (None if cache was reused).
+        curved_rgb: Option<Vec<f32>>,
     },
 }
 
@@ -93,6 +157,16 @@ pub struct DevelopPreview {
     tone_inflight: bool,
     /// Need another tone pass after the in-flight one finishes.
     tone_dirty: bool,
+    /// Stage 1 cache: linear RGB after exposure × WB gains.
+    balanced_cache: Option<StageCache>,
+    /// Stage 2 cache: linear RGB after luminance curves.
+    curved_cache: Option<StageCache>,
+    /// Shared GPU context. `Some` enables the GPU tone worker;
+    /// `None` falls back to the existing CPU path.
+    gpu: Option<Arc<GpuContext>>,
+    /// Per-photo GPU backend (only valid when `gpu.is_some()`).
+    /// Wrapped in `Arc<Mutex<_>>` so the worker thread can dispatch.
+    gpu_backend: Option<Arc<Mutex<GpuBackend>>>,
     tx: Sender<PreviewResult>,
     rx: Receiver<PreviewResult>,
 }
@@ -120,6 +194,10 @@ impl Default for DevelopPreview {
             tone_gen: 0,
             tone_inflight: false,
             tone_dirty: false,
+            balanced_cache: None,
+            curved_cache: None,
+            gpu: None,
+            gpu_backend: None,
             tx,
             rx,
         }
@@ -127,6 +205,14 @@ impl Default for DevelopPreview {
 }
 
 impl DevelopPreview {
+    /// Install (or clear) the GPU context. When `Some`, tone workers
+    /// dispatch on the GPU. Switching contexts or photo ids invalidates
+    /// the cached GPU state automatically.
+    pub fn set_gpu(&mut self, gpu: Option<Arc<GpuContext>>) {
+        self.gpu = gpu.clone();
+        self.gpu_backend = gpu.map(|g| Arc::new(Mutex::new(GpuBackend::new(g))));
+    }
+
     pub fn is_active_for(&self, photo_id: i64) -> bool {
         self.photo_id == Some(photo_id) && (self.loading || self.settled || self.image.is_some())
     }
@@ -165,6 +251,12 @@ impl DevelopPreview {
         self.tone_gen = 0;
         self.tone_inflight = false;
         self.tone_dirty = false;
+        self.balanced_cache = None;
+        self.curved_cache = None;
+        if let Some(b) = &self.gpu_backend
+            && let Ok(mut g) = b.lock() {
+                g.invalidate();
+            }
         self.loading = true;
         self.settled = false;
         self.demosaic_progress = None;
@@ -259,8 +351,8 @@ impl DevelopPreview {
                         });
 
                         // Disk caches after the UI is unblocked.
-                        if demosaic_report.is_some() {
-                            if let Err(e) = preview_cache::save_linear(
+                        if demosaic_report.is_some()
+                            && let Err(e) = preview_cache::save_linear(
                                 &catalog_dir,
                                 photo_id,
                                 orientation,
@@ -270,7 +362,6 @@ impl DevelopPreview {
                                     "linear cache save failed for photo {photo_id}: {e}"
                                 );
                             }
-                        }
                         // Refresh tone-current JPEG placeholder for next open.
                         let cache_img = apply_tone(&linear, &tone, PREVIEW_MAX_DIM);
                         if let Err(e) =
@@ -407,6 +498,19 @@ impl DevelopPreview {
         }
     }
 
+    /// Effective render dim: full `tone_max_dim()` while idle, divided
+    /// by [`DRAG_QUALITY_DIVISOR`] (clamped) while a slider is being
+    /// dragged. The lower-res output is bilinear-upscaled to the display
+    /// rect by egui; on drag-stop the next tone pass runs at the full
+    /// size and snaps in.
+    fn render_max_dim(&self) -> u32 {
+        if !self.dragging {
+            return self.tone_max_dim();
+        }
+        let full = self.tone_max_dim();
+        (full / DRAG_QUALITY_DIVISOR).max(DRAG_QUALITY_MIN_DIM)
+    }
+
     fn fading(&self) -> bool {
         self.reveal.is_some()
     }
@@ -418,7 +522,7 @@ impl DevelopPreview {
     }
 
     fn try_spawn_tone(&mut self) {
-        if self.tone_inflight || !self.tone_dirty {
+        if !self.tone_dirty {
             return;
         }
         // Hold re-tones until the thumb overlay has fully dissolved.
@@ -437,17 +541,133 @@ impl DevelopPreview {
         let tone_gen = self.tone_gen;
         let generation = self.generation;
         let tone = self.tone;
-        let max_dim = self.tone_max_dim();
+        // Drag-quality: render at a fraction of the on-screen size while
+        // a slider is held. The output texture is bilinear-upscaled to
+        // the display rect by egui, so the user sees a slightly fuzzy
+        // preview that updates much faster. Drag-stop triggers a normal
+        // `set_tone(_, false)` call which routes through here with the
+        // full dim.
+        let max_dim = self.render_max_dim();
         let tx = self.tx.clone();
+
+        // GPU path: the heavy pixel work runs on the device; the
+        // worker thread mostly blocks on `Device::poll` / `map_async`.
+        if let Some(gpu_backend) = self.gpu_backend.clone() {
+            thread::Builder::new()
+                .name("develop-tone-gpu".into())
+                .spawn(move || {
+                    let out = match gpu_backend.lock() {
+                        Ok(mut backend) => {
+                            let (pw, ph) = proxy_dims(linear.width, linear.height, max_dim);
+                            let (out_w, out_h) = if linear.width <= max_dim
+                                && linear.height <= max_dim
+                            {
+                                (linear.width, linear.height)
+                            } else {
+                                (pw, ph)
+                            };
+                            let result = backend.apply(&linear, &tone, out_w, out_h);
+                            result.image
+                        }
+                        Err(_) => return,
+                    };
+                    let _ = tx.send(PreviewResult {
+                        photo_id,
+                        generation,
+                        kind: ResultKind::Tone {
+                            tone_gen,
+                            img: out,
+                            balanced_rgb: None,
+                            balanced_w: 0,
+                            balanced_h: 0,
+                            curved_rgb: None,
+                        },
+                    });
+                })
+                .expect("spawn develop-tone-gpu");
+            return;
+        }
+
+        // CPU path: stage-cache aware, identical to before.
+        // Determine which stage caches are still valid.
+        let (proxy_w, proxy_h) = proxy_dims(linear.width, linear.height, max_dim);
+        let bhash = hash_balance(tone.exposure, tone.temp, tone.tint);
+        let chash = hash_curves(
+            tone.contrast,
+            tone.highlights,
+            tone.shadows,
+            tone.whites,
+            tone.blacks,
+        );
+
+        let prev_balanced = self
+            .balanced_cache
+            .as_ref()
+            .filter(|c| c.valid(bhash, proxy_w, proxy_h))
+            .map(|c| Arc::from(c.rgb.as_slice()));
+
+        // Curves cache is only valid if balance cache is also valid (it
+        // depends on the balanced data, not just the curve params).
+        let prev_curved = match prev_balanced {
+            Some(_) => self
+                .curved_cache
+                .as_ref()
+                .filter(|c| c.valid(chash, proxy_w, proxy_h))
+                .map(|c| Arc::from(c.rgb.as_slice())),
+            None => None,
+        };
 
         thread::Builder::new()
             .name("develop-tone".into())
             .spawn(move || {
-                let img = apply_tone(&linear, &tone, max_dim);
+                let (pw, ph, proxy) = if linear.width <= max_dim && linear.height <= max_dim {
+                    (linear.width, linear.height, linear.rgb.clone())
+                } else {
+                    downscale_rgb_nearest(&linear.rgb, linear.width, linear.height, max_dim)
+                };
+
+                // Stage 1: Balance (exposure × WB gains).
+                let (balanced, new_balanced) = match prev_balanced {
+                    Some(arc) => (arc, None),
+                    None => {
+                        let bal =
+                            apply_balance(&proxy, pw, ph, tone.exposure, tone.temp, tone.tint);
+                        (Arc::from(bal.as_slice()), Some(bal))
+                    }
+                };
+
+                // Stage 2: Luminance curves (contrast, H/S/W/B).
+                let (curved, new_curved) = match prev_curved {
+                    Some(arc) => (arc, None),
+                    None => {
+                        let curv = apply_curves(
+                            &balanced,
+                            pw,
+                            ph,
+                            tone.contrast,
+                            tone.highlights,
+                            tone.shadows,
+                            tone.whites,
+                            tone.blacks,
+                        );
+                        (Arc::from(curv.as_slice()), Some(curv))
+                    }
+                };
+
+                // Stage 3: sRGB gamma + saturation → u8 RGBA.
+                let img = apply_output(&curved, pw, ph, tone.saturation);
+
                 let _ = tx.send(PreviewResult {
                     photo_id,
                     generation,
-                    kind: ResultKind::Tone { tone_gen, img },
+                    kind: ResultKind::Tone {
+                        tone_gen,
+                        img,
+                        balanced_rgb: new_balanced,
+                        balanced_w: pw,
+                        balanced_h: ph,
+                        curved_rgb: new_curved,
+                    },
                 });
             })
             .expect("spawn develop-tone");
@@ -465,6 +685,12 @@ impl DevelopPreview {
         self.linear = None;
         self.tone_inflight = false;
         self.tone_dirty = false;
+        self.balanced_cache = None;
+        self.curved_cache = None;
+        if let Some(b) = &self.gpu_backend
+            && let Ok(mut g) = b.lock() {
+                g.invalidate();
+            }
         self.loading = false;
         self.settled = true;
         self.demosaic_progress = None;
@@ -483,6 +709,12 @@ impl DevelopPreview {
         self.linear = None;
         self.tone_inflight = false;
         self.tone_dirty = false;
+        self.balanced_cache = None;
+        self.curved_cache = None;
+        if let Some(b) = &self.gpu_backend
+            && let Ok(mut g) = b.lock() {
+                g.invalidate();
+            }
         self.status = None;
         self.loading = false;
         self.settled = false;
@@ -535,9 +767,12 @@ impl DevelopPreview {
                                     | PreviewSource::CachedPreview
                             )
                         );
-                    if self.display_aspect.is_none() {
-                        self.lock_aspect(display.width, display.height);
-                    }
+                    // Always re-lock aspect from the demosaic: it is the
+                    // authoritative source of the linear's aspect. The
+                    // placeholder may be the un-oriented library thumb
+                    // (cached at import time) which would set a wrong
+                    // aspect and stretch the demosaic into the rect.
+                    self.lock_aspect(display.width, display.height);
                     if has_placeholder {
                         // Keep thumb as base; fade demosaic in on top.
                         // Base texture is NOT replaced → no pop/flash.
@@ -585,12 +820,47 @@ impl DevelopPreview {
                         self.status = None;
                     }
                 }
-                ResultKind::Tone { tone_gen, img } => {
-                    self.tone_inflight = false;
-                    // Never swap textures mid-crossfade.
+                ResultKind::Tone {
+                    tone_gen,
+                    img,
+                    balanced_rgb,
+                    balanced_w,
+                    balanced_h,
+                    curved_rgb,
+                } => {
                     if self.fading() {
+                        self.tone_inflight = false;
                         self.tone_dirty = true;
                     } else if tone_gen == self.tone_gen {
+                        self.tone_inflight = false;
+                        if let Some(rgb) = balanced_rgb {
+                            self.balanced_cache = Some(StageCache {
+                                params_hash: hash_balance(
+                                    self.tone.exposure,
+                                    self.tone.temp,
+                                    self.tone.tint,
+                                ),
+                                rgb,
+                                width: balanced_w,
+                                height: balanced_h,
+                                cached_at: Instant::now(),
+                            });
+                        }
+                        if let Some(rgb) = curved_rgb {
+                            self.curved_cache = Some(StageCache {
+                                params_hash: hash_curves(
+                                    self.tone.contrast,
+                                    self.tone.highlights,
+                                    self.tone.shadows,
+                                    self.tone.whites,
+                                    self.tone.blacks,
+                                ),
+                                rgb,
+                                width: balanced_w,
+                                height: balanced_h,
+                                cached_at: Instant::now(),
+                            });
+                        }
                         self.set_base(ctx, img);
                     }
                     self.try_spawn_tone();
@@ -696,9 +966,7 @@ impl DevelopPreview {
     /// `None` if no crossfade is active.
     pub fn reveal_alpha(&self) -> Option<f32> {
         let start = self.fade_start?;
-        if self.reveal.is_none() {
-            return None;
-        }
+        self.reveal.as_ref()?;
         let t = (start.elapsed().as_secs_f32() / FADE_SECS).clamp(0.0, 1.0);
         // Smoothstep — soft ease in/out, starts at 0 so first frame is pure thumb.
         Some(t * t * (3.0 - 2.0 * t))
@@ -767,4 +1035,61 @@ fn fit_view_max_dim(avail: egui::Vec2, ppp: f32, img_w: u32, img_h: u32) -> u32 
 fn dim_changed_enough(prev: u32, next: u32) -> bool {
     let diff = prev.abs_diff(next);
     diff >= 16 || diff as f32 / prev.max(1) as f32 >= 0.05
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::develop::LinearPreview;
+
+    /// Helper: build a `DevelopPreview` with the given view dim and
+    /// dragging flag, no linear buffer attached (so `tone_max_dim`
+    /// ignores the linear clamp).
+    fn make(view_max_dim: u32, dragging: bool) -> DevelopPreview {
+        let mut p = DevelopPreview::default();
+        p.view_max_dim = view_max_dim;
+        p.dragging = dragging;
+        p
+    }
+
+    #[test]
+    fn render_max_dim_is_full_when_idle() {
+        let p = make(1500, false);
+        assert_eq!(p.render_max_dim(), 1500);
+    }
+
+    #[test]
+    fn render_max_dim_halves_while_dragging() {
+        let p = make(1500, true);
+        assert_eq!(p.render_max_dim(), 1500 / DRAG_QUALITY_DIVISOR);
+    }
+
+    #[test]
+    fn render_max_dim_clamps_to_min_when_dragging() {
+        let p = make(40, true);
+        assert_eq!(p.render_max_dim(), DRAG_QUALITY_MIN_DIM);
+    }
+
+    #[test]
+    fn render_max_dim_drops_back_to_full_after_drag_stops() {
+        let mut p = make(1500, true);
+        assert_eq!(p.render_max_dim(), 750);
+        p.dragging = false;
+        assert_eq!(p.render_max_dim(), 1500);
+    }
+
+    #[test]
+    fn render_max_dim_caps_at_linear_buffer_size() {
+        let mut p = make(2048, false);
+        p.linear = Some(Arc::new(LinearPreview {
+            width: 1024,
+            height: 768,
+            rgb: vec![0.0; 1024 * 768 * 3],
+        }));
+        // 2048 > 1024, so tone_max_dim clamps to 1024.
+        assert_eq!(p.render_max_dim(), 1024);
+        // Drag halves it.
+        p.dragging = true;
+        assert_eq!(p.render_max_dim(), 1024 / DRAG_QUALITY_DIVISOR);
+    }
 }

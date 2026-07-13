@@ -1,6 +1,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::gpu::GpuContext;
 use crate::import::thumbnail::Thumbnail;
 use crate::thumb_grid::ThumbnailBytes;
 
@@ -142,12 +144,16 @@ pub fn get_or_generate(
 /// thumbnail on disk. Also refreshes the develop sRGB preview cache so
 /// reopening the photo does not flash a stale identity-tone image.
 /// Intended for low-priority post-edit refresh.
+///
+/// When `gpu` is `Some`, the tone stage runs on the GPU. Falls back to
+/// CPU if wgpu init failed at startup.
 pub fn regenerate_from_develop(
     catalog_dir: &Path,
     photo_id: i64,
     source_path: &Path,
     orientation: Option<i64>,
     tone: crate::develop::ToneParams,
+    gpu: Option<Arc<GpuContext>>,
 ) -> Result<ThumbnailBytes, String> {
     use crate::catalog::preview_cache;
     use crate::develop::{apply_tone, develop_linear, PreviewImage, PreviewSource, PREVIEW_MAX_DIM};
@@ -163,7 +169,37 @@ pub fn regenerate_from_develop(
         lin
     };
 
-    let img = apply_tone(&linear, &tone, CACHE_MAX_DIM);
+    // Tone at CACHE_MAX_DIM for the thumbnail and at PREVIEW_MAX_DIM for
+    // the develop sRGB placeholder. Both share one GPU backend so the
+    // linear upload happens only once.
+    //
+    // The call site wraps us in `catch_unwind`; wgpu types are not
+    // `UnwindSafe`, so guard with `AssertUnwindSafe` here. The GPU work
+    // is mostly math / driver calls; we still want to surface genuine
+    // panics as a worker error rather than crash the whole library.
+    let (img, preview_img) = if let Some(gpu) = gpu {
+        let mut backend = std::panic::AssertUnwindSafe(crate::gpu::GpuBackend::new(gpu));
+        let cache_out = backend.apply(&linear, &tone, CACHE_MAX_DIM, CACHE_MAX_DIM);
+        let preview_out = backend.apply(&linear, &tone, PREVIEW_MAX_DIM, PREVIEW_MAX_DIM);
+        let preview_img = PreviewImage {
+            width: preview_out.image.width,
+            height: preview_out.image.height,
+            rgba: preview_out.image.rgba,
+            source: PreviewSource::CachedPreview,
+        };
+        (cache_out.image, Some(preview_img))
+    } else {
+        let img = apply_tone(&linear, &tone, CACHE_MAX_DIM);
+        let preview = apply_tone(&linear, &tone, PREVIEW_MAX_DIM);
+        let preview_img = PreviewImage {
+            width: preview.width,
+            height: preview.height,
+            rgba: preview.rgba,
+            source: PreviewSource::CachedPreview,
+        };
+        (img, Some(preview_img))
+    };
+
     let thumb = Thumbnail {
         width: img.width,
         height: img.height,
@@ -172,19 +208,9 @@ pub fn regenerate_from_develop(
     };
     save_thumbnail(catalog_dir, photo_id, &thumb).map_err(|e| e.to_string())?;
 
-    // Keep develop placeholder cache in sync with current tone so a
-    // later open does not prefer a stale identity demosaic JPEG.
-    let preview = apply_tone(&linear, &tone, PREVIEW_MAX_DIM);
-    let _ = preview_cache::save_preview(
-        catalog_dir,
-        photo_id,
-        &PreviewImage {
-            width: preview.width,
-            height: preview.height,
-            rgba: preview.rgba,
-            source: PreviewSource::CachedPreview,
-        },
-    );
+    if let Some(preview) = preview_img {
+        let _ = preview_cache::save_preview(catalog_dir, photo_id, &preview);
+    }
 
     let small = resize_thumbnail(&thumb, CACHE_MAX_DIM);
     Ok(ThumbnailBytes {

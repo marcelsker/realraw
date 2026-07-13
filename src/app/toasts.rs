@@ -7,14 +7,9 @@ pub struct Toast {
     pub duration: Duration,
 }
 
+#[derive(Default)]
 pub struct Toasts {
     list: Vec<Toast>,
-}
-
-impl Default for Toasts {
-    fn default() -> Self {
-        Self { list: Vec::new() }
-    }
 }
 
 impl Toasts {

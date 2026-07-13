@@ -26,6 +26,12 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
             ui.hyperlink_to("github.com/devsker/realraw", "https://github.com/devsker/realraw");
             ui.hyperlink_to("codeberg.org/sker/realraw", "https://codeberg.org/devsker/realraw");
             ui.add_space(8.0);
+            if let Some(gpu) = &app.gpu {
+                ui.label(format!("GPU tone: {}", gpu.adapter_label()));
+            } else {
+                ui.label("GPU tone: not available (using CPU)");
+            }
+            ui.add_space(8.0);
             ui.vertical_centered(|ui| {
                 if ui.button("Close").clicked() {
                     app.show_about = false;

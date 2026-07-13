@@ -145,6 +145,7 @@ impl DevelopSettings {
             blacks: self.blacks,
             temp: self.temp,
             tint: self.tint,
+            saturation: self.saturation,
         }
     }
 
@@ -217,6 +218,7 @@ pub struct ToneParams {
     pub blacks: f32,
     pub temp: f32,
     pub tint: f32,
+    pub saturation: f32,
 }
 
 impl Default for ToneParams {
@@ -230,6 +232,7 @@ impl Default for ToneParams {
             blacks: 0.0,
             temp: 0.0,
             tint: 0.0,
+            saturation: 0.0,
         }
     }
 }
@@ -258,6 +261,7 @@ impl ToneParams {
             && (self.blacks - other.blacks).abs() < 1e-6
             && (self.temp - other.temp).abs() < 1e-6
             && (self.tint - other.tint).abs() < 1e-6
+            && (self.saturation - other.saturation).abs() < 1e-6
     }
 
     /// Kelvin value corresponding to the current temp offset.

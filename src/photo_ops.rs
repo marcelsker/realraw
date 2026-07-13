@@ -138,6 +138,7 @@ struct RemoveRequest {
 /// (e.g. from a context menu), then call [`show`][Self::show] every
 /// frame. The dialog handles the confirmation, spawns a background
 /// task for the deletion, and reports completion.
+#[derive(Default)]
 pub struct RemoveDialog {
     /// Pending removal request while the confirmation dialog is visible.
     pending: Option<RemoveRequest>,
@@ -146,16 +147,6 @@ pub struct RemoveDialog {
     error: Option<String>,
     /// Task id of the in-flight deletion, if any.
     task_id: Option<TaskId>,
-}
-
-impl Default for RemoveDialog {
-    fn default() -> Self {
-        Self {
-            pending: None,
-            error: None,
-            task_id: None,
-        }
-    }
 }
 
 impl RemoveDialog {

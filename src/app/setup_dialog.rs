@@ -27,10 +27,10 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label("Save location:");
             ui.label(app.setup_dir.display().to_string());
-            if ui.button("Browse...").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    app.setup_dir = p;
-                }
+            if ui.button("Browse...").clicked()
+                && let Some(p) = rfd::FileDialog::new().pick_folder()
+            {
+                app.setup_dir = p;
             }
         });
 
@@ -67,24 +67,23 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
 
         ui.add_space(4.0);
 
-        if ui.button("Open Existing Collection...").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
+        if ui.button("Open Existing Collection...").clicked()
+            && let Some(path) = rfd::FileDialog::new()
                 .add_filter("SQLite", &["sqlite", "db"])
                 .pick_file()
-            {
-                match Catalog::open(&path) {
-                    Ok(cat) => {
-                        Catalog::save_last_path(cat.path());
-                        let counts = cat.counts().ok();
-                        app.catalog = Some(Arc::new(cat));
-                        app.catalog_counts = counts;
-                        app.catalog_error = None;
-                        app.setup_error = None;
-                        catalog_created = true;
-                    }
-                    Err(e) => {
-                        app.setup_error = Some(e.to_string());
-                    }
+        {
+            match Catalog::open(&path) {
+                Ok(cat) => {
+                    Catalog::save_last_path(cat.path());
+                    let counts = cat.counts().ok();
+                    app.catalog = Some(Arc::new(cat));
+                    app.catalog_counts = counts;
+                    app.catalog_error = None;
+                    app.setup_error = None;
+                    catalog_created = true;
+                }
+                Err(e) => {
+                    app.setup_error = Some(e.to_string());
                 }
             }
         }

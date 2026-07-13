@@ -264,7 +264,7 @@ fn process_one(
                     std::fs::copy(path, &dest)?;
                 }
                 ImportAction::Move => {
-                    if let Err(_) = std::fs::rename(path, &dest) {
+                    if std::fs::rename(path, &dest).is_err() {
                         std::fs::copy(path, &dest)?;
                         std::fs::remove_file(path)?;
                     }

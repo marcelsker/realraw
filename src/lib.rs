@@ -16,6 +16,7 @@ pub mod app;
 pub mod catalog;
 pub mod develop;
 pub mod export;
+pub mod gpu;
 pub mod import;
 pub mod photo_ops;
 pub mod task;

@@ -472,20 +472,68 @@ fn apply_tone_rgb(r: f32, g: f32, b: f32, tone: &ToneParams) -> [f32; 3] {
     [(r * scale).max(0.0), (g * scale).max(0.0), (b * scale).max(0.0)]
 }
 
-fn tone_to_preview(rgb: &[f32], width: u32, height: u32, tone: &ToneParams) -> PreviewImage {
-    let gain = 2f32.powf(tone.exposure);
-    let [r_wb, g_wb, b_wb] = wb_gains(tone.temp, tone.tint);
+/// Stage 1: exposure gain × white-balance gains. Returns linear RGB.
+pub fn apply_balance(rgb: &[f32], width: u32, height: u32, exposure: f32, temp: f32, tint: f32) -> Vec<f32> {
+    let gain = 2f32.powf(exposure);
+    let [r_wb, g_wb, b_wb] = wb_gains(temp, tint);
+    let n = width as usize * height as usize;
+    let mut out = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let base = i * 3;
+        out.push(rgb[base] * gain * r_wb);
+        out.push(rgb[base + 1] * gain * g_wb);
+        out.push(rgb[base + 2] * gain * b_wb);
+    }
+    out
+}
+
+/// Stage 2: luminance curves (contrast, highlights, shadows, whites, blacks). Returns linear RGB.
+pub fn apply_curves(
+    rgb: &[f32],
+    width: u32,
+    height: u32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+) -> Vec<f32> {
+    let tone = ToneParams {
+        contrast,
+        highlights,
+        shadows,
+        whites,
+        blacks,
+        ..ToneParams::default()
+    };
+    let n = width as usize * height as usize;
+    let mut out = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let base = i * 3;
+        let [r, g, b] = apply_tone_rgb(rgb[base], rgb[base + 1], rgb[base + 2], &tone);
+        out.push(r);
+        out.push(g);
+        out.push(b);
+    }
+    out
+}
+
+/// Stage 3: sRGB gamma + saturation → u8 RGBA.
+pub fn apply_output(rgb: &[f32], width: u32, height: u32, saturation: f32) -> PreviewImage {
     let n = width as usize * height as usize;
     let mut rgba = Vec::with_capacity(n * 4);
     for i in 0..n {
         let base = i * 3;
-        let rl = rgb[base] * gain * r_wb;
-        let gl = rgb[base + 1] * gain * g_wb;
-        let bl = rgb[base + 2] * gain * b_wb;
-        let [rl, gl, bl] = apply_tone_rgb(rl, gl, bl, tone);
-        let r = srgb_apply_gamma(rl.clamp(0.0, 1.0));
-        let g = srgb_apply_gamma(gl.clamp(0.0, 1.0));
-        let b = srgb_apply_gamma(bl.clamp(0.0, 1.0));
+        let mut r = srgb_apply_gamma(rgb[base].clamp(0.0, 1.0));
+        let mut g = srgb_apply_gamma(rgb[base + 1].clamp(0.0, 1.0));
+        let mut b = srgb_apply_gamma(rgb[base + 2].clamp(0.0, 1.0));
+        if saturation.abs() > 1e-6 {
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let k = 1.0 + saturation / 100.0;
+            r = (y + (r - y) * k).clamp(0.0, 1.0);
+            g = (y + (g - y) * k).clamp(0.0, 1.0);
+            b = (y + (b - y) * k).clamp(0.0, 1.0);
+        }
         rgba.push((r * 255.0 + 0.5) as u8);
         rgba.push((g * 255.0 + 0.5) as u8);
         rgba.push((b * 255.0 + 0.5) as u8);
@@ -497,6 +545,21 @@ fn tone_to_preview(rgb: &[f32], width: u32, height: u32, tone: &ToneParams) -> P
         rgba,
         source: PreviewSource::Demosaic,
     }
+}
+
+fn tone_to_preview(rgb: &[f32], width: u32, height: u32, tone: &ToneParams) -> PreviewImage {
+    let balanced = apply_balance(rgb, width, height, tone.exposure, tone.temp, tone.tint);
+    let curved = apply_curves(
+        &balanced,
+        width,
+        height,
+        tone.contrast,
+        tone.highlights,
+        tone.shadows,
+        tone.whites,
+        tone.blacks,
+    );
+    apply_output(&curved, width, height, tone.saturation)
 }
 
 fn apply_orientation_rgb(
@@ -662,7 +725,20 @@ fn downscale_rgb_with_progress(
     (nw, nh, out)
 }
 
-fn downscale_rgb_nearest(
+/// Output dimensions if `rgb` were downscaled with `max_dim` via [`downscale_rgb_nearest`].
+pub(crate) fn proxy_dims(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
+    if width <= max_dim && height <= max_dim {
+        (width, height)
+    } else {
+        let scale = (max_dim as f32 / width.max(height) as f32).min(1.0);
+        (
+            ((width as f32 * scale).round() as u32).max(1),
+            ((height as f32 * scale).round() as u32).max(1),
+        )
+    }
+}
+
+pub(crate) fn downscale_rgb_nearest(
     rgb: &[f32],
     width: u32,
     height: u32,

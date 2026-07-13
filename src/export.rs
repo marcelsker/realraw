@@ -1,8 +1,10 @@
 //! Simple export: develop current photo + write JPEG/PNG.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::develop::{apply_tone, develop_linear, PreviewImage, ToneParams};
+use crate::gpu::GpuContext;
 use crate::task::{Task, TaskContext, TaskId, TaskManager};
 
 /// JPEG quality for exported files.
@@ -10,12 +12,16 @@ const EXPORT_JPEG_QUALITY: u8 = 92;
 
 /// Spawn a background task that develops `source` with tone params and
 /// writes the result to `dest` (format from extension: `.png` or JPEG).
+///
+/// When `gpu` is `Some`, the tone stage runs on the GPU. Falls back to
+/// CPU if wgpu init failed at startup.
 pub fn spawn_export_task(
     mgr: &mut TaskManager,
     source: PathBuf,
     orientation: Option<i64>,
     tone: ToneParams,
     dest: PathBuf,
+    gpu: Option<Arc<GpuContext>>,
 ) -> TaskId {
     let label = dest
         .file_name()
@@ -39,7 +45,14 @@ pub fn spawn_export_task(
             ctx.set_progress(0.65);
             ctx.set_message("Applying tone…");
 
-            let img = apply_tone(&linear, &tone, u32::MAX);
+            let img = if let Some(gpu) = gpu {
+                let mut backend = crate::gpu::GpuBackend::new(gpu);
+                backend
+                    .apply(&linear, &tone, linear.width, linear.height)
+                    .image
+            } else {
+                apply_tone(&linear, &tone, u32::MAX)
+            };
             if ctx.is_cancelled() {
                 return Err("cancelled".into());
             }
@@ -77,10 +90,10 @@ pub fn ensure_export_extension(path: PathBuf) -> PathBuf {
 }
 
 fn write_image(img: &PreviewImage, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     let rgba = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())

@@ -1,4 +1,5 @@
 use eframe::egui::{self, ViewportBuilder};
+use eframe::Renderer;
 use realraw::app::App;
 
 fn main() -> eframe::Result<()> {
@@ -6,6 +7,7 @@ fn main() -> eframe::Result<()> {
         .expect("Failed to decode app icon");
     let options = eframe::NativeOptions {
         viewport: ViewportBuilder::default().with_icon(icon),
+        renderer: Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native(

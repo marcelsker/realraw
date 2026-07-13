@@ -104,21 +104,80 @@ pub fn extract_dialog_preview(path: &Path) -> Result<Thumbnail, ThumbnailError> 
 fn extract_thumbnail_sized(path: &Path, max_dim: u32) -> Result<Thumbnail, ThumbnailError> {
     // Strategy 1: largest embedded JPEG (EXIF tags + optional file scan).
     if let Ok(t) = extract_largest_preview_jpeg(path, max_dim) {
-        return Ok(t);
+        return orient_thumbnail(path, t);
     }
 
     // Strategy 2: rawler's camera-aware RGB preview (CR3, etc.).
     if let Ok(t) = extract_rawler_preview(path, max_dim) {
-        return Ok(t);
+        return orient_thumbnail(path, t);
     }
 
     // Strategy 3: full-file decode for JPEGs and other supported types.
     if let Ok(t) = extract_full(path, max_dim) {
-        return Ok(t);
+        return orient_thumbnail(path, t);
     }
 
     // Strategy 4: raw sensor decode via rawler (undemosaiced grayscale).
-    extract_raw_thumbnail(path, max_dim)
+    let t = extract_raw_thumbnail(path, max_dim)?;
+    orient_thumbnail(path, t)
+}
+
+/// Apply EXIF orientation to a thumbnail. Returns the original thumbnail
+/// unchanged when no orientation tag is present or orientation is 1/0.
+fn orient_thumbnail(path: &Path, thumb: Thumbnail) -> Result<Thumbnail, ThumbnailError> {
+    let Some(ori) = read_orientation(path) else {
+        return Ok(thumb);
+    };
+    if ori == 1 || ori == 0 {
+        return Ok(thumb);
+    }
+    let max_dim = thumb.max_dim;
+    let img = image::RgbaImage::from_raw(thumb.width, thumb.height, thumb.rgba)
+        .ok_or_else(|| ThumbnailError::Unsupported)?;
+    let oriented: image::RgbaImage = match ori {
+        2 => image::imageops::flip_horizontal(&img),
+        3 => image::imageops::rotate180(&img),
+        4 => image::imageops::flip_vertical(&img),
+        5 => {
+            let t = image::imageops::rotate90(&img);
+            image::imageops::flip_horizontal(&t)
+        }
+        6 => image::imageops::rotate90(&img),
+        7 => {
+            let t = image::imageops::rotate90(&img);
+            image::imageops::flip_vertical(&t)
+        }
+        8 => image::imageops::rotate270(&img),
+        _ => img,
+    };
+    // Re-resize after orientation (rotations may change the long edge).
+    let resized = if oriented.width().max(oriented.height()) > max_dim {
+        image::DynamicImage::ImageRgba8(oriented).thumbnail(max_dim, max_dim)
+    } else {
+        image::DynamicImage::ImageRgba8(oriented)
+    };
+    let rgba = resized.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(Thumbnail {
+        width: w,
+        height: h,
+        rgba: rgba.into_raw(),
+        max_dim,
+    })
+}
+
+/// Read EXIF orientation from a file. Returns `None` when EXIF is absent
+/// or unreadable (treats parse errors as missing — every file that lacks
+/// a camera EXIF block returns `None`, which is the common case for
+/// non-raw, non-JPEG files).
+fn read_orientation(path: &Path) -> Option<i64> {
+    use exif::{In, Reader, Tag};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let exif = Reader::new().read_from_container(&mut reader).ok()?;
+    exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .map(|v| v as i64)
 }
 
 /// Collect every EXIF-tagged JPEG (and, if needed, scanned JPEG blobs),
@@ -178,7 +237,7 @@ pub fn extract_largest_preview_jpeg(
     }
 
     // Prefer larger blobs (full previews over 160×120 IFD1 thumbs).
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Try candidates largest-first; skip non-JPEG / undecodable blobs.
     let mut last_err = ThumbnailError::Exif("no decodable embedded JPEG".into());

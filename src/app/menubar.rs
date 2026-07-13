@@ -222,6 +222,7 @@ fn export_current_photo(app: &mut App) {
         photo.orientation,
         app.develop.tone(),
         dest,
+        app.gpu.clone(),
     );
     app.toasts.add("Export started");
 }

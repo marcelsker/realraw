@@ -83,10 +83,10 @@ impl XmpData {
             p.keywords = self.keywords.clone();
         }
         p.copyright = p.copyright.clone().or_else(|| self.copyright.clone());
-        if p.date_taken.is_none() {
-            if let Some(ref d) = self.create_date {
-                p.date_taken = parse_xmp_datetime(d);
-            }
+        if p.date_taken.is_none()
+            && let Some(ref d) = self.create_date
+        {
+            p.date_taken = parse_xmp_datetime(d);
         }
     }
 }
@@ -241,12 +241,11 @@ pub fn parse_xmp_str(xml: &str) -> Result<XmpData, XmpError> {
                     in_li = false;
                     text_buf.clear();
                 } else if is_rdf_array(&name) {
-                    if let Some(ref prop) = array_of {
-                        if is_langalt_prop(prop) {
-                            if let Some(v) = pick_langalt(&langalt_values) {
-                                apply_simple_prop(&mut data, prop, &v);
-                            }
-                        }
+                    if let Some(ref prop) = array_of
+                        && is_langalt_prop(prop)
+                        && let Some(v) = pick_langalt(&langalt_values)
+                    {
+                        apply_simple_prop(&mut data, prop, &v);
                     }
                     array_of = None;
                     langalt_values.clear();
@@ -286,10 +285,10 @@ pub fn parse_xmp_str(xml: &str) -> Result<XmpData, XmpError> {
 
 /// Write a canonical XMP sidecar next to (or at) `path`.
 pub fn write_xmp_file(path: &Path, data: &XmpData) -> Result<(), XmpError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let xml = serialize_xmp(data);
     let mut f = std::fs::File::create(path)?;
@@ -427,6 +426,7 @@ pub fn serialize_xmp(data: &XmpData) -> String {
 }
 
 /// Build [`XmpData`] from catalog fields for write-back.
+#[allow(clippy::too_many_arguments)]
 pub fn xmp_from_photo_fields(
     rating: i64,
     color_label: i64,
@@ -774,10 +774,8 @@ fn apply_array_item(data: &mut XmpData, prop: &ExpandedName, val: &str) {
                 data.keywords.push(v.to_string());
             }
         }
-        (NS_DC, "creator") | ("", "creator") => {
-            if data.creator.is_none() {
-                data.creator = Some(v.to_string());
-            }
+        (NS_DC, "creator") | ("", "creator") if data.creator.is_none() => {
+            data.creator = Some(v.to_string());
         }
         _ => {}
     }
@@ -832,10 +830,10 @@ fn decode_xmp_text(bytes: &[u8]) -> String {
 
 fn strip_xpacket(xml: &str) -> &str {
     let mut s = xml.trim();
-    if let Some(rest) = s.strip_prefix("<?xpacket") {
-        if let Some(end) = rest.find("?>") {
-            s = rest[end + 2..].trim_start();
-        }
+    if let Some(rest) = s.strip_prefix("<?xpacket")
+        && let Some(end) = rest.find("?>")
+    {
+        s = rest[end + 2..].trim_start();
     }
     if let Some(idx) = s.rfind("<?xpacket") {
         s = s[..idx].trim_end();

@@ -280,6 +280,7 @@ impl LibraryPage {
         source_path: PathBuf,
         orientation: Option<i64>,
         tone: crate::develop::ToneParams,
+        gpu: Option<std::sync::Arc<crate::gpu::GpuContext>>,
     ) {
         self.inflight_thumbs.fetch_add(1, Ordering::Relaxed);
         let tx = self.thumb_tx.clone();
@@ -288,15 +289,19 @@ impl LibraryPage {
             .spawn(move || {
                 // Yield so interactive develop-tone / import work stays snappy.
                 thread::sleep(std::time::Duration::from_millis(75));
-                let result = match std::panic::catch_unwind(|| {
+                // wgpu types are not UnwindSafe; AssertUnwindSafe keeps
+                // the catch_unwind contract intact while letting the GPU
+                // path through.
+                let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     thumbnail_cache::regenerate_from_develop(
                         &catalog_dir,
                         photo_id,
                         &source_path,
                         orientation,
                         tone,
+                        gpu,
                     )
-                }) {
+                })) {
                     Ok(r) => r,
                     Err(_) => Err("developed thumbnail worker panicked".into()),
                 };

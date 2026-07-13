@@ -117,13 +117,14 @@ pub fn decode_embedded_preview(
     let mut best: Option<DynamicImage> = None;
     let mut best_pixels: u64 = 0;
 
-    for candidate in [extract_embedded_jpeg(path), scan_largest_jpeg(path)] {
-        if let Ok(img) = candidate {
-            let pixels = img.width() as u64 * img.height() as u64;
-            if pixels > best_pixels {
-                best_pixels = pixels;
-                best = Some(img);
-            }
+    for img in [extract_embedded_jpeg(path), scan_largest_jpeg(path)]
+        .into_iter()
+        .flatten()
+    {
+        let pixels = img.width() as u64 * img.height() as u64;
+        if pixels > best_pixels {
+            best_pixels = pixels;
+            best = Some(img);
         }
     }
 
@@ -303,7 +304,7 @@ fn extract_embedded_jpeg(path: &Path) -> Result<DynamicImage, String> {
     }
 
     // Prefer larger blobs (likely the full preview, not the tiny CFA thumb).
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (offset, length) in candidates {
         let mut buf = vec![0u8; length as usize];

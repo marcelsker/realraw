@@ -73,6 +73,7 @@ fn fire_thumb_refresh(app: &mut App, photo_id: i64) {
         PathBuf::from(&photo.path),
         photo.orientation,
         tone,
+        app.gpu.clone(),
     );
 }
 
@@ -87,6 +88,7 @@ fn slider_row(
     label: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    disabled_tooltip: Option<&str>,
 ) -> SliderHit {
     let mut hit = SliderHit {
         changed: false,
@@ -94,7 +96,12 @@ fn slider_row(
     };
     ui.horizontal(|ui| {
         ui.add_sized([80.0, 0.0], egui::Label::new(label));
-        let r = ui.add(egui::Slider::new(value, range).show_value(true));
+        let r = if let Some(tip) = disabled_tooltip {
+            ui.add_enabled(false, egui::Slider::new(value, range).show_value(true))
+                .on_disabled_hover_text(tip)
+        } else {
+            ui.add(egui::Slider::new(value, range).show_value(true))
+        };
         if r.changed() || r.drag_stopped() {
             hit.changed = true;
         }
@@ -126,14 +133,14 @@ fn current_preset_display(app: &App) -> WhiteBalancePreset {
 /// Apply a white-balance preset and mark state as dirty.
 fn apply_preset(app: &mut App, preset: WhiteBalancePreset, any: &mut bool) {
     app.develop.apply_wb_preset(preset);
-    if preset == WhiteBalancePreset::Auto {
-        if let Some(linear) = &app.develop_preview.linear {
-            let (t, ti) = auto_wb(linear);
-            app.develop.temp = t;
-            app.develop.tint = ti;
-            app.last_auto_temp = t;
-            app.last_auto_tint = ti;
-        }
+    if preset == WhiteBalancePreset::Auto
+        && let Some(linear) = &app.develop_preview.linear
+    {
+        let (t, ti) = auto_wb(linear);
+        app.develop.temp = t;
+        app.develop.tint = ti;
+        app.last_auto_temp = t;
+        app.last_auto_tint = ti;
     }
     *any = true;
     app.develop_preview.set_tone(app.develop.tone(), false);
@@ -271,10 +278,9 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                                 if ui
                                     .selectable_label(display == *preset, preset.name())
                                     .clicked()
+                                    && *preset != display
                                 {
-                                    if *preset != display {
-                                        apply_preset(app, *preset, &mut any);
-                                    }
+                                    apply_preset(app, *preset, &mut any);
                                 }
                             }
                         });
@@ -292,7 +298,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     ui.horizontal(|ui| {
                         ui.add_sized([80.0, 0.0], egui::Label::new("Kelvin"));
                         let r = ui.add(
-                            egui::Slider::new(&mut kelvin, 2000.0..=25000.0).show_value(true),
+                            egui::Slider::new(&mut kelvin, 2000.0..=25000.0).show_value(true).fixed_decimals(0),
                         );
                         if r.changed() || r.drag_stopped() {
                             kelvin = kelvin.clamp(2000.0, 25000.0);
@@ -309,7 +315,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
 
                 // ── Tint slider ──
                 {
-                    let hit = slider_row(ui, "Tint", &mut app.develop.tint, -100.0..=100.0);
+                    let hit = slider_row(ui, "Tint", &mut app.develop.tint, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -321,7 +327,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 ui.add_space(12.0);
                 section_header(ui, "Light");
                 {
-                    let hit = slider_row(ui, "Exposure", &mut app.develop.exposure, -5.0..=5.0);
+                    let hit = slider_row(ui, "Exposure", &mut app.develop.exposure, -5.0..=5.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -330,7 +336,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     dragging |= hit.dragging;
                 }
                 {
-                    let hit = slider_row(ui, "Contrast", &mut app.develop.contrast, -100.0..=100.0);
+                    let hit = slider_row(ui, "Contrast", &mut app.develop.contrast, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -340,7 +346,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 }
                 {
                     let hit =
-                        slider_row(ui, "Highlights", &mut app.develop.highlights, -100.0..=100.0);
+                        slider_row(ui, "Highlights", &mut app.develop.highlights, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -349,7 +355,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     dragging |= hit.dragging;
                 }
                 {
-                    let hit = slider_row(ui, "Shadows", &mut app.develop.shadows, -100.0..=100.0);
+                    let hit = slider_row(ui, "Shadows", &mut app.develop.shadows, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -358,7 +364,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     dragging |= hit.dragging;
                 }
                 {
-                    let hit = slider_row(ui, "Whites", &mut app.develop.whites, -100.0..=100.0);
+                    let hit = slider_row(ui, "Whites", &mut app.develop.whites, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -367,7 +373,7 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                     dragging |= hit.dragging;
                 }
                 {
-                    let hit = slider_row(ui, "Blacks", &mut app.develop.blacks, -100.0..=100.0);
+                    let hit = slider_row(ui, "Blacks", &mut app.develop.blacks, -100.0..=100.0, None);
                     if hit.changed {
                         any = true;
                         app.develop_preview
@@ -379,18 +385,34 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 ui.add_space(12.0);
                 section_header(ui, "Presence");
                 {
-                    let h = slider_row(ui, "Clarity", &mut app.develop.clarity, -100.0..=100.0);
+                    let h = slider_row(
+                        ui,
+                        "Clarity",
+                        &mut app.develop.clarity,
+                        -100.0..=100.0,
+                        Some("Not implemented yet"),
+                    );
                     any |= h.changed;
                     dragging |= h.dragging;
                 }
                 {
-                    let h = slider_row(ui, "Vibrance", &mut app.develop.vibrance, -100.0..=100.0);
+                    let h = slider_row(
+                        ui,
+                        "Vibrance",
+                        &mut app.develop.vibrance,
+                        -100.0..=100.0,
+                        Some("Not implemented yet"),
+                    );
                     any |= h.changed;
                     dragging |= h.dragging;
                 }
                 {
-                    let h = slider_row(ui, "Saturation", &mut app.develop.saturation, -100.0..=100.0);
-                    any |= h.changed;
+                    let h = slider_row(ui, "Saturation", &mut app.develop.saturation, -100.0..=100.0, None);
+                    if h.changed {
+                        any = true;
+                        app.develop_preview
+                            .set_tone(app.develop.tone(), h.dragging);
+                    }
                     dragging |= h.dragging;
                 }
 
@@ -475,12 +497,12 @@ pub(crate) fn render(app: &mut App, ctx: &egui::Context) {
                 // Base stays the thumbnail for the whole crossfade (no pop).
                 ui.painter().image(base_id, rect, uv, egui::Color32::WHITE);
                 // Demosaic fades in on top: result = demosaic*a + thumb*(1-a).
-                if let (Some(rev_id), Some(a)) = (reveal, reveal_alpha) {
-                    if a > 0.001 {
-                        let a_u8 = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, a_u8);
-                        ui.painter().image(rev_id, rect, uv, tint);
-                    }
+                if let (Some(rev_id), Some(a)) = (reveal, reveal_alpha)
+                    && a > 0.001
+                {
+                    let a_u8 = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    let tint = egui::Color32::from_rgba_unmultiplied(255, 255, 255, a_u8);
+                    ui.painter().image(rev_id, rect, uv, tint);
                 }
                 // Eyedropper click: sample pixel and compute WB.
                 if app.eyedropper_active && response.clicked() {

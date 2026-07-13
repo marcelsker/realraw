@@ -24,7 +24,7 @@ name = "realraw"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.31"
+eframe = { version = "0.31", features = ["wgpu"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
@@ -42,6 +42,9 @@ hex = "0.4"
 rawler = "0.7"
 libraw-rs-sys = { path = "crates/libraw-sys" }
 egui-phosphor = "0.9"
+wgpu = { version = "24", default-features = false, features = ["wgsl", "metal", "dx12", "glsl"] }
+naga = "24"
+bytemuck = "1"
 cacache-sync = "11"
 quick-xml = "0.41"
 
@@ -65,3 +68,4 @@ embed-resource = "3"
 
 [dev-dependencies]
 tempfile = "3"
+pollster = "0.4"

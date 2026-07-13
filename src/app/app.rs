@@ -10,6 +10,7 @@ use eframe::egui;
 use crate::app::library::LibraryPage;
 use crate::catalog::{Catalog, Counts};
 use crate::develop::{DevelopPreview, DevelopSettings};
+use crate::gpu::GpuContext;
 use crate::import::{ImportDialog, ImportSummary, dialog::Phase as DialogPhase};
 use crate::task::{TaskManager, TaskSnapshot, TaskStatus};
 
@@ -88,6 +89,15 @@ pub struct App {
 
     /// Progressive RAW preview for Develop mode.
     pub develop_preview: DevelopPreview,
+
+    /// Shared wgpu context, captured on the first frame where the wgpu
+    /// backend is up. `None` falls back to the CPU tone pipeline.
+    pub gpu: Option<Arc<GpuContext>>,
+
+    /// True once we've handed the GPU context to the develop preview.
+    /// Avoids calling `DevelopPreview::set_gpu` every frame (which would
+    /// invalidate the GPU stage cache).
+    pub gpu_propagated: bool,
 
     /// The library page: thumbnail grid of every photo in the catalog.
     pub library: LibraryPage,
@@ -186,6 +196,8 @@ impl Default for App {
             last_auto_temp: 0.0,
             last_auto_tint: 0.0,
             develop_preview: DevelopPreview::default(),
+            gpu: None,
+            gpu_propagated: false,
             library: LibraryPage::default(),
             library_last_refresh_mtime_ms: None,
             library_needs_refresh: false,
@@ -206,7 +218,24 @@ impl Default for App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Capture the wgpu context on the first frame it's available.
+        if self.gpu.is_none()
+            && let Some(rs) = frame.wgpu_render_state()
+        {
+            self.gpu = GpuContext::from_render_state(rs).map(Arc::new);
+            if let Some(gpu) = &self.gpu {
+                eprintln!("realraw: GPU tone enabled on {}", gpu.adapter_label());
+            }
+        }
+        // Propagate the GPU context to the develop preview so its tone
+        // workers can dispatch compute instead of CPU loops. Done once,
+        // when the context first becomes available.
+        if !self.gpu_propagated && self.gpu.is_some() {
+            self.develop_preview.set_gpu(self.gpu.clone());
+            self.gpu_propagated = true;
+        }
+
         // Drain the startup check result (runs in a background thread).
         if let Some(rx) = &self.startup_rx
             && let Ok(result) = rx.try_recv()
